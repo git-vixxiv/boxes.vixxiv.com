@@ -1,0 +1,16 @@
+{
+  "name": "boxes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npm run test:unit && npm run test:rules && npm run test:ui",
+    "test:unit": "node --test tests/entitlement.test.mjs tests/functions.test.mjs",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-boxes \"node --test tests/rules.test.mjs\"",
+    "test:ui": "node --test tests/ui.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.4",
+    "firebase": "^10.14.1",
+    "firebase-tools": "^13.29.1"
+  }
+}

@@ -5,6 +5,9 @@
 
 import { firebaseDB } from './firebase-db.js';
 import { isFirebaseConfigured } from './firebase-config.js';
+import { BILLING, isBillingConfigured } from './billing-config.js';
+import { entitlement } from './entitlement.js';
+import { analytics } from './analytics.js';
 
 // ==================== GLOBAL STATE ====================
 let currentView = 'home';
@@ -184,6 +187,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     initEventListeners();
     initVoiceInput();
+    initBilling();
+    initAnalyticsConsent();
     await refreshData();
 });
 
@@ -205,12 +210,27 @@ function handleAuthStateChange(user) {
         elements.notSignedInView.classList.remove('active');
         switchView('home');
 
+        analytics.identify(user.uid);
+        analytics.track('session_started');
+        syncAnalyticsPref();
+        entitlement.start({
+            app: firebaseDB.app,
+            db: firebaseDB.db,
+            user,
+            onChange: renderEntitlement
+        });
+        handleCheckoutReturn();
+
         // Refresh data from Firebase
         refreshData();
     } else {
         // User is signed out
         useFirebase = false;
         activeDB = db; // Fall back to local database
+
+        entitlement.stop();
+        analytics.identify(null);
+        renderEntitlement(entitlement.current);
 
         elements.authLoggedIn.classList.add('hidden');
         elements.authLoggedOut.classList.remove('hidden');
@@ -520,6 +540,176 @@ async function handleSignOut() {
     }
 }
 
+// ==================== PLAN, TRIAL AND PAYWALL ====================
+
+/**
+ * Gate for anything that adds or changes inventory. Viewing, searching,
+ * exporting and deleting stay open after a trial or subscription ends.
+ * The server enforces the same rule (firestore.rules); this is the UI half.
+ */
+function ensureCanWrite(reason) {
+    if (!useFirebase || entitlement.current.canWrite) return true;
+    openPaywall(reason);
+    return false;
+}
+
+function openPaywall(reason) {
+    const expired = entitlement.current.state === 'expired';
+    document.getElementById('paywallTitle').textContent =
+        expired ? 'Your free trial has ended' : 'Subscribe to Boxes';
+    document.getElementById('paywallIntro').textContent = expired
+        ? 'Everything you saved is still here to view, search and export. Subscribe to keep adding and updating.'
+        : 'Keep adding and updating your inventory after your free trial.';
+    document.getElementById('paywallModal').classList.remove('hidden');
+    analytics.track('paywall_shown', { reason, plan_state: entitlement.current.state });
+}
+
+function renderEntitlement(current, previous) {
+    const banner = document.getElementById('planBanner');
+    const text = document.getElementById('planBannerText');
+    const subscribeMenu = document.getElementById('subscribeMenuBtn');
+    const manageMenu = document.getElementById('manageSubscriptionBtn');
+    const signedIn = useFirebase;
+
+    const showBanner = signedIn && (current.state === 'trial' || current.state === 'expired');
+    banner.classList.toggle('hidden', !showBanner);
+    banner.classList.toggle('expired', current.state === 'expired');
+    if (current.state === 'trial') {
+        const days = current.trialDaysLeft;
+        text.textContent = days === 1
+            ? 'Free trial: last day'
+            : `Free trial: ${days} days left`;
+    } else if (current.state === 'expired') {
+        text.textContent = 'Free trial ended. Your inventory is read-only.';
+    }
+
+    subscribeMenu.classList.toggle('hidden', !showBanner);
+    manageMenu.classList.toggle('hidden', !(signedIn && current.state === 'subscribed'));
+
+    if (entitlement.trialJustStarted && current.state === 'trial') {
+        entitlement.trialJustStarted = false;
+        analytics.track('trial_started');
+    }
+    if (previous && previous.state === 'trial' && current.state === 'expired') {
+        analytics.track('trial_expired');
+    }
+    if (previous && previous.state !== 'loading' && previous.state !== 'subscribed'
+        && current.state === 'subscribed') {
+        document.getElementById('paywallModal').classList.add('hidden');
+        showToast('You are subscribed. Thank you!', 'success');
+    }
+}
+
+async function handleSubscribe(planKey, button) {
+    analytics.track('checkout_started', { plan: planKey });
+    analytics.flush(); // the page is about to leave for Stripe
+    const label = button.innerHTML;
+    button.disabled = true;
+    button.textContent = 'Opening checkout...';
+    try {
+        await entitlement.startCheckout(planKey);
+    } catch (error) {
+        analytics.track('checkout_failed', { plan: planKey });
+        showToast(error.message, 'error');
+        button.disabled = false;
+        button.innerHTML = label;
+    }
+}
+
+async function handleManageSubscription() {
+    showToast('Opening your subscription...');
+    try {
+        await entitlement.openPortal();
+    } catch (error) {
+        showToast('Could not open your subscription: ' + error.message, 'error');
+    }
+}
+
+function handleCheckoutReturn() {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('checkout');
+    if (!result) return;
+    if (result === 'success') {
+        showToast('Payment received. Activating your subscription...', 'success');
+    } else {
+        analytics.track('checkout_cancelled');
+    }
+    history.replaceState(null, '', window.location.pathname);
+}
+
+function initBilling() {
+    for (const [key, plan] of Object.entries(BILLING.plans)) {
+        const button = document.querySelector(`.plan-option[data-plan="${key}"]`);
+        if (!button) continue;
+        button.querySelector('.plan-name').textContent = plan.label;
+        button.querySelector('.plan-price').textContent = `${plan.price} ${plan.period}`;
+        button.querySelector('.plan-note').textContent = plan.note || '';
+        button.addEventListener('click', () => handleSubscribe(key, button));
+    }
+    document.getElementById('paywallUnavailable')
+        .classList.toggle('hidden', isBillingConfigured());
+
+    document.getElementById('planBannerBtn')
+        .addEventListener('click', () => openPaywall('banner'));
+    document.getElementById('subscribeMenuBtn').addEventListener('click', (e) => {
+        e.preventDefault();
+        elements.menu.classList.add('hidden');
+        openPaywall('menu');
+    });
+    document.getElementById('manageSubscriptionBtn').addEventListener('click', (e) => {
+        e.preventDefault();
+        elements.menu.classList.add('hidden');
+        handleManageSubscription();
+    });
+    document.querySelectorAll('.trial-days').forEach(el => {
+        el.textContent = BILLING.trialDays;
+    });
+}
+
+// ==================== ANALYTICS CONSENT ====================
+
+// Mirror the analytics choice to the account so server-side reporting
+// follows it. Written only when it differs from what was last saved.
+async function syncAnalyticsPref() {
+    const user = firebaseDB.getCurrentUser();
+    if (!user || !analytics.isConfigured()) return;
+    const key = `boxes.analytics.synced.${user.uid}`;
+    const value = String(analytics.isEnabled());
+    try {
+        if (localStorage.getItem(key) === value) return;
+        await firebaseDB.setAnalyticsPref(analytics.isEnabled());
+        localStorage.setItem(key, value);
+    } catch (error) {
+        console.warn('Could not save analytics preference:', error);
+    }
+}
+
+function updateAnalyticsToggle() {
+    const toggle = document.getElementById('analyticsToggleBtn');
+    toggle.classList.toggle('hidden', !analytics.isConfigured());
+    toggle.textContent = `Usage analytics: ${analytics.isEnabled() ? 'On' : 'Off'}`;
+}
+
+function initAnalyticsConsent() {
+    const banner = document.getElementById('consentBanner');
+    const choose = (granted) => {
+        analytics.setConsent(granted);
+        banner.classList.add('hidden');
+        updateAnalyticsToggle();
+        syncAnalyticsPref();
+    };
+    document.getElementById('consentAllowBtn').addEventListener('click', () => choose(true));
+    document.getElementById('consentDeclineBtn').addEventListener('click', () => choose(false));
+    document.getElementById('analyticsToggleBtn').addEventListener('click', (e) => {
+        e.preventDefault();
+        choose(!analytics.isEnabled());
+        showToast(`Usage analytics turned ${analytics.isEnabled() ? 'on' : 'off'}`);
+    });
+
+    if (analytics.needsConsentPrompt()) banner.classList.remove('hidden');
+    updateAnalyticsToggle();
+}
+
 // ==================== VIEW MANAGEMENT ====================
 
 function toggleMenu() {
@@ -787,7 +977,7 @@ async function viewItem(id) {
     let html = '';
 
     if (item.photo) {
-        html += `<img src="${item.photo}" alt="${item.name}" class="view-item-image">`;
+        html += `<img src="${item.photo}" alt="${escapeHtml(item.name)}" class="view-item-image">`;
     }
 
     // Show checked out status if applicable
@@ -863,6 +1053,7 @@ window.viewContainerFromItem = async function(containerId) {
 };
 
 async function openItemModal(id = null) {
+    if (!ensureCanWrite('item_form')) return;
     await populateContainerSelect();
 
     // Clear any existing suggestions
@@ -948,6 +1139,7 @@ function clearItemNameSuggestion() {
 
 async function handleItemSubmit(e) {
     e.preventDefault();
+    if (!ensureCanWrite('item_save')) return;
 
     const id = elements.itemId.value;
     const selectedContainer = elements.itemContainer.value;
@@ -962,9 +1154,11 @@ async function handleItemSubmit(e) {
         if (id) {
             await activeDB.updateItem(id, data);
             showToast('Item updated!', 'success');
+            analytics.track('item_updated', { has_photo: !!data.photo });
         } else {
             await activeDB.addItem(data);
             showToast('Item added!', 'success');
+            analytics.track('item_created', { has_photo: !!data.photo, add_another: addAnotherMode });
         }
 
         await refreshData();
@@ -1002,11 +1196,13 @@ async function deleteItem(id) {
 // ==================== CHECK IN/OUT ====================
 
 function openCheckOutModal() {
+    if (!ensureCanWrite('check_out')) return;
     elements.checkOutNote.value = '';
     elements.checkOutModal.classList.remove('hidden');
 }
 
 async function openCheckInModal() {
+    if (!ensureCanWrite('check_in')) return;
     await populateCheckInContainerSelect();
 
     // Get the item to see if there's a previous container
@@ -1041,12 +1237,14 @@ async function populateCheckInContainerSelect() {
 
 async function handleCheckOut(e) {
     e.preventDefault();
+    if (!ensureCanWrite('check_out')) return;
 
     const note = elements.checkOutNote.value.trim();
 
     try {
         await activeDB.checkOutItem(currentItemId, note);
         showToast('Item checked out!', 'success');
+        analytics.track('item_checked_out', { has_note: !!note });
         elements.checkOutModal.classList.add('hidden');
         await refreshData();
     } catch (error) {
@@ -1056,6 +1254,7 @@ async function handleCheckOut(e) {
 
 async function handleCheckIn(e) {
     e.preventDefault();
+    if (!ensureCanWrite('check_in')) return;
 
     const containerId = elements.checkInContainer.value;
 
@@ -1067,6 +1266,7 @@ async function handleCheckIn(e) {
     try {
         await activeDB.checkInItem(currentItemId, containerId);
         showToast('Item checked in!', 'success');
+        analytics.track('item_checked_in');
         elements.checkInModal.classList.add('hidden');
         await refreshData();
     } catch (error) {
@@ -1199,6 +1399,7 @@ window.viewItemFromContainer = async function(itemId) {
 };
 
 async function openContainerModal(id = null) {
+    if (!ensureCanWrite('box_form')) return;
     // Clear any existing suggestions
     clearContainerNameSuggestion();
 
@@ -1282,6 +1483,7 @@ function clearContainerNameSuggestion() {
 
 async function handleContainerSubmit(e) {
     e.preventDefault();
+    if (!ensureCanWrite('box_save')) return;
 
     const id = elements.containerId.value;
     const data = {
@@ -1299,6 +1501,7 @@ async function handleContainerSubmit(e) {
         } else {
             await activeDB.addContainer(data);
             showToast('Container added!', 'success');
+            analytics.track('box_created', { has_photo: !!data.photo, box_type: data.type });
         }
 
         elements.containerModal.classList.add('hidden');
@@ -1470,7 +1673,20 @@ async function handleSearch() {
     searchTimeout = setTimeout(async () => {
         const results = await activeDB.search(query);
         renderSearchResults(results);
+        trackSearch(results);
     }, 200);
+}
+
+// One event per burst of typing, not one per keystroke.
+let searchTrackTimeout = null;
+function trackSearch(results) {
+    clearTimeout(searchTrackTimeout);
+    searchTrackTimeout = setTimeout(() => {
+        analytics.track('search_used', {
+            item_results: results.items.length,
+            box_results: results.containers.length
+        });
+    }, 1500);
 }
 
 async function renderSearchResults(results) {
@@ -1554,6 +1770,7 @@ async function exportData() {
         setTimeout(() => URL.revokeObjectURL(url), 5000);
 
         showToast(`Exported ${data.summary?.totalItems || 0} items, ${data.summary?.totalContainers || 0} containers`, 'success');
+        analytics.track('data_exported', { items: data.summary?.totalItems || 0 });
     } catch (error) {
         console.error('Export error:', error);
         showToast('Export failed: ' + error.message, 'error');
@@ -1616,8 +1833,15 @@ function showExportFallback(json, filename) {
 async function handleImport(e) {
     const file = e.target.files[0];
     if (!file) return;
+    if (!ensureCanWrite('import')) {
+        e.target.value = '';
+        return;
+    }
 
-    if (!confirm('This will replace all your current data. Are you sure you want to import?')) {
+    const warning = useFirebase
+        ? 'This adds the records in the file to your inventory. Records that already exist are updated; nothing is deleted. Continue?'
+        : 'This will replace all your current data. Are you sure you want to import?';
+    if (!confirm(warning)) {
         e.target.value = '';
         return;
     }
@@ -1628,6 +1852,10 @@ async function handleImport(e) {
         const result = await activeDB.importData(data);
 
         showToast(`Imported ${result.containersImported} containers and ${result.itemsImported} items!`, 'success');
+        analytics.track('backup_imported', {
+            boxes: result.containersImported,
+            items: result.itemsImported
+        });
         await refreshData();
     } catch (error) {
         showToast('Import failed: ' + error.message, 'error');
@@ -1676,8 +1904,14 @@ function startVoiceInput(targetId, button) {
 
     let baseValue = target.value;
     if (baseValue && !baseValue.endsWith(' ')) baseValue += ' ';
+    let voiceStartTracked = false;
+    let voiceResultTracked = false;
 
     recognition.onstart = () => {
+        if (!voiceStartTracked) {
+            voiceStartTracked = true;
+            analytics.track('voice_input_started', { field: targetId, mobile: isMobile });
+        }
         button.classList.add('listening');
         if (hint) {
             hint.textContent = '🎤 Listening... (tap mic again to stop)';
@@ -1698,6 +1932,10 @@ function startVoiceInput(targetId, button) {
             }
         }
 
+        if (finalTranscript && !voiceResultTracked) {
+            voiceResultTracked = true;
+            analytics.track('voice_input_transcribed', { field: targetId, mobile: isMobile });
+        }
         if (finalTranscript) {
             baseValue += finalTranscript;
             if (!baseValue.endsWith(' ')) baseValue += ' ';
@@ -1714,7 +1952,9 @@ function startVoiceInput(targetId, button) {
         if (event.error === 'no-speech' || event.error === 'aborted') {
             // Common, not really an error - let onend handle restart
             return;
-        } else if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        }
+        analytics.track('voice_input_failed', { error: event.error, mobile: isMobile });
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
             showToast('Microphone permission denied. Allow it in your browser settings.', 'error');
             userStoppedVoice = true;
         } else if (event.error === 'network') {
@@ -1813,6 +2053,7 @@ function initVoiceInput() {
 let bulkImportData = null;
 
 function openBulkImportModal() {
+    if (!ensureCanWrite('bulk_import')) return;
     document.getElementById('bulkImportStep1').classList.remove('hidden');
     document.getElementById('bulkImportStep2').classList.add('hidden');
     document.getElementById('bulkImportStep3').classList.add('hidden');
@@ -2075,6 +2316,7 @@ function renderBulkImportPreview() {
 }
 
 async function executeBulkImport() {
+    if (!ensureCanWrite('bulk_import')) return;
     const data = bulkImportData;
     if (!data) return;
 
@@ -2143,6 +2385,11 @@ async function executeBulkImport() {
     if (containersCreated > 0) msg += ` and created ${containersCreated} boxes`;
     if (failures.length > 0) msg += ` (${failures.length} failed)`;
     showToast(msg, failures.length > 0 ? 'error' : 'success');
+    analytics.track('bulk_import_completed', {
+        items: itemsCreated,
+        boxes: containersCreated,
+        failures: failures.length
+    });
 
     if (failures.length > 0) {
         console.error('Bulk import failures:', failures);
@@ -2159,9 +2406,13 @@ async function executeBulkImport() {
 // ==================== UTILITIES ====================
 
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    // Safe in both element content and quoted attributes.
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function formatDate(isoString) {

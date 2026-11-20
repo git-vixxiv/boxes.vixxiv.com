@@ -1,93 +1,68 @@
 /**
- * Box Inventory - Service Worker
- * Enables offline functionality
+ * Boxes - Service Worker
+ *
+ * Network first, cache as the offline fallback. The app is always served
+ * fresh when online, so a new release can never be stuck behind an old cache.
  */
 
-const CACHE_NAME = 'box-inventory-v1';
+const CACHE_NAME = 'boxes-v2';
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
     '/styles.css',
     '/db.js',
     '/app.js',
+    '/firebase-config.js',
+    '/firebase-db.js',
+    '/billing-config.js',
+    '/entitlement-core.js',
+    '/entitlement.js',
+    '/analytics.js',
     '/manifest.json',
     '/icons/icon.svg',
-    '/icons/icon-192.svg'
+    '/icons/icon-192.svg',
+    '/icons/logo.png'
 ];
 
-// Install event - cache assets
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => {
-                console.log('Caching app assets');
-                return cache.addAll(ASSETS_TO_CACHE);
-            })
-            .then(() => {
-                // Activate immediately
-                return self.skipWaiting();
-            })
+            .then((cache) => cache.addAll(ASSETS_TO_CACHE))
+            .then(() => self.skipWaiting())
     );
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys()
-            .then((cacheNames) => {
-                return Promise.all(
-                    cacheNames
-                        .filter((name) => name !== CACHE_NAME)
-                        .map((name) => caches.delete(name))
-                );
-            })
-            .then(() => {
-                // Take control of all pages immediately
-                return self.clients.claim();
-            })
+            .then((names) => Promise.all(
+                names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))
+            ))
+            .then(() => self.clients.claim())
     );
 });
 
-// Fetch event - serve from cache, fallback to network
 self.addEventListener('fetch', (event) => {
-    // Skip non-GET requests
-    if (event.request.method !== 'GET') {
-        return;
-    }
+    const request = event.request;
+    if (request.method !== 'GET') return;
+
+    // Only the app's own files; Firebase, Stripe and analytics go straight out.
+    if (new URL(request.url).origin !== self.location.origin) return;
 
     event.respondWith(
-        caches.match(event.request)
-            .then((cachedResponse) => {
-                if (cachedResponse) {
-                    // Return cached version
-                    return cachedResponse;
+        fetch(request)
+            .then((response) => {
+                if (response && response.status === 200 && response.type === 'basic') {
+                    const copy = response.clone();
+                    caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
                 }
-
-                // Fetch from network
-                return fetch(event.request)
-                    .then((response) => {
-                        // Don't cache if not a valid response
-                        if (!response || response.status !== 200 || response.type !== 'basic') {
-                            return response;
-                        }
-
-                        // Clone the response
-                        const responseToCache = response.clone();
-
-                        // Cache the new resource
-                        caches.open(CACHE_NAME)
-                            .then((cache) => {
-                                cache.put(event.request, responseToCache);
-                            });
-
-                        return response;
-                    })
-                    .catch(() => {
-                        // Return offline fallback for HTML requests
-                        if (event.request.headers.get('accept').includes('text/html')) {
-                            return caches.match('/index.html');
-                        }
-                    });
+                return response;
+            })
+            .catch(async () => {
+                const cached = await caches.match(request, { ignoreSearch: true });
+                if (cached) return cached;
+                if (request.mode === 'navigate') return caches.match('/index.html');
+                return Response.error();
             })
     );
 });
