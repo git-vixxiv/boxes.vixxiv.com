@@ -5,7 +5,7 @@
  * drives the UI. Keep the two in step.
  *
  *   comped      -> on the business allow-list, full access
- *   subscribed  -> active Stripe subscription, full access
+ *   subscribed  -> active Square subscription, full access
  *   trial       -> inside the free trial, full access
  *   expired     -> read-only: view, search, export and delete still work
  *   loading     -> not known yet; the UI stays open and the server decides

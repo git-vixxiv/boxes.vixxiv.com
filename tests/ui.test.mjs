@@ -1,6 +1,6 @@
 /**
  * Browser tests for the paid flow. The real app runs in Chromium against an
- * in-browser stand-in for Firebase (tests/ui/fake-firebase.js); Stripe and
+ * in-browser stand-in for Firebase (tests/ui/fake-firebase.js); Square and
  * Amplitude are intercepted, so nothing leaves the machine.
  *
  *   npm run test:ui      (needs Playwright with Chromium installed)

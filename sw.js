@@ -46,7 +46,7 @@ self.addEventListener('fetch', (event) => {
     const request = event.request;
     if (request.method !== 'GET') return;
 
-    // Only the app's own files; Firebase, Stripe and analytics go straight out.
+    // Only the app's own files; Firebase, Square and analytics go straight out.
     if (new URL(request.url).origin !== self.location.origin) return;
 
     event.respondWith(
