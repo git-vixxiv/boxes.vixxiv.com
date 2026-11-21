@@ -34,6 +34,12 @@
             <button id="menuBtn" class="icon-btn" aria-label="Menu">☰</button>
         </header>
 
+        <!-- Trial / plan status -->
+        <div id="planBanner" class="plan-banner hidden">
+            <span id="planBannerText"></span>
+            <button id="planBannerBtn" type="button" class="plan-banner-btn">Subscribe</button>
+        </div>
+
         <!-- Navigation Menu (hidden by default) -->
         <nav id="menu" class="menu hidden">
             <a href="#" data-view="home" class="menu-item active">Home</a>
@@ -48,6 +54,10 @@
             <hr>
             <a href="#" id="exportBtn" class="menu-item">Export Data (JSON)</a>
             <a href="#" id="importBtn" class="menu-item">Import Data</a>
+            <hr>
+            <a href="#" id="subscribeMenuBtn" class="menu-item hidden">Subscribe</a>
+            <a href="#" id="manageSubscriptionBtn" class="menu-item hidden">Manage Subscription</a>
+            <a href="#" id="analyticsToggleBtn" class="menu-item hidden">Usage analytics: Off</a>
             <input type="file" id="importFile" accept=".json" class="hidden">
             <input type="file" id="bulkImportFile" accept=".csv,.tsv,.txt" class="hidden">
         </nav>
@@ -63,9 +73,9 @@
             <section id="notSignedInView" class="view hidden">
                 <div class="sign-in-prompt">
                     <h2>Welcome to Boxes</h2>
-                    <p>Sign in to sync your inventory across all your devices.</p>
+                    <p>Know what is in every box, bin and drawer, from any device.</p>
                     <button id="signInPromptBtn" class="primary-btn large">Sign in with Google</button>
-                    <p class="sign-in-note">Your data will be securely stored in the cloud and accessible from any device.</p>
+                    <p class="sign-in-note">Free for <span class="trial-days">7</span> days, no card needed. Then $3.99 a month or $29.99 a year.</p>
                 </div>
             </section>
 
@@ -466,6 +476,69 @@
         </div>
 
         <!-- Toast notifications -->
+        <!-- Paywall -->
+        <div id="paywallModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="paywallTitle">Subscribe to Boxes</h3>
+                    <button id="paywallCloseBtn" type="button" class="close-btn" aria-label="Close">&times;</button>
+                </div>
+                <div id="paywallPlans" class="paywall-body">
+                    <p id="paywallIntro"></p>
+                    <div class="plan-options">
+                        <button type="button" class="plan-option featured" data-plan="yearly">
+                            <span class="plan-name"></span>
+                            <span class="plan-price"></span>
+                            <span class="plan-note"></span>
+                        </button>
+                        <button type="button" class="plan-option" data-plan="monthly">
+                            <span class="plan-name"></span>
+                            <span class="plan-price"></span>
+                            <span class="plan-note"></span>
+                        </button>
+                    </div>
+                    <p id="paywallUnavailable" class="form-help hidden">Subscriptions are not open yet.</p>
+                    <p class="form-help">Cancel any time. Your inventory stays viewable and exportable either way.</p>
+                </div>
+                <div id="paywallPay" class="paywall-body hidden">
+                    <p id="paySummary" class="pay-summary"></p>
+                    <div id="cardContainer" class="card-container"></div>
+                    <p id="payError" class="pay-error hidden" role="alert"></p>
+                    <div class="form-actions">
+                        <button id="payBackBtn" type="button" class="secondary-btn">Back</button>
+                        <button id="paySubmitBtn" type="button" class="primary-btn">Subscribe</button>
+                    </div>
+                    <p class="form-help">Payments are handled by Square. Renews automatically until you cancel.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Manage subscription -->
+        <div id="subscriptionModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Your Subscription</h3>
+                    <button class="close-btn" data-close="subscriptionModal" aria-label="Close">&times;</button>
+                </div>
+                <div class="paywall-body">
+                    <div id="subscriptionDetails"></div>
+                    <div class="form-actions">
+                        <button id="cancelSubscriptionBtn" type="button" class="secondary-btn danger">Cancel Subscription</button>
+                        <button type="button" class="secondary-btn" data-close="subscriptionModal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Analytics consent (shown only where required) -->
+        <div id="consentBanner" class="consent-banner hidden" role="dialog" aria-label="Usage analytics">
+            <p>May we collect anonymous usage data to improve Boxes? We never collect what you store: no item names, descriptions or photos.</p>
+            <div class="consent-actions">
+                <button id="consentDeclineBtn" type="button" class="secondary-btn">No thanks</button>
+                <button id="consentAllowBtn" type="button" class="primary-btn">Allow</button>
+            </div>
+        </div>
+
         <div id="toast" class="toast hidden"></div>
     </div>
 

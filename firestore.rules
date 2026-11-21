@@ -1,0 +1,92 @@
+rules_version = '2';
+
+// Boxes - Firestore security rules.
+//
+// Access model (mirrored for the UI in entitlement-core.js):
+//   - Everyone can always read, export and delete their own inventory.
+//   - Adding or changing items and boxes needs one of:
+//       an active subscription   (billing/{uid}, written only by the server)
+//       an unexpired free trial  (users/{uid}.trialStartedAt + 7 days)
+//       a business allow-list    (comp/{email}, managed in the console)
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // After a cancellation the subscription stays active until the paid
+    // period ends; endsAt carries that date.
+    function isSubscriber(uid) {
+      let billing = get(/databases/$(database)/documents/billing/$(uid));
+      return billing != null
+        && billing.data.get('active', false) == true
+        && (billing.data.get('endsAt', null) == null || request.time < billing.data.endsAt);
+    }
+
+    function isComped() {
+      return request.auth.token.get('email_verified', false) == true
+        && 'email' in request.auth.token
+        && exists(/databases/$(database)/documents/comp/$(request.auth.token.email.lower()));
+    }
+
+    function inTrial(uid) {
+      let profile = get(/databases/$(database)/documents/users/$(uid));
+      return profile != null
+        && profile.data.trialStartedAt is timestamp
+        && request.time < profile.data.trialStartedAt + duration.value(7, 'd');
+    }
+
+    function canWrite(uid) {
+      return isSubscriber(uid) || inTrial(uid) || isComped();
+    }
+
+    // Profile: holds the trial start. Written once, stamped by the server
+    // clock, never changed or removed - so a trial cannot be restarted.
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['trialStartedAt'])
+        && request.resource.data.trialStartedAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // Inventory.
+    match /users/{uid}/{collection}/{docId} {
+      allow read, delete: if isOwner(uid)
+        && collection in ['items', 'containers'];
+      allow create, update: if isOwner(uid)
+        && collection in ['items', 'containers']
+        && canWrite(uid);
+    }
+
+    // Whether this user has usage analytics switched on. The server reads it
+    // before reporting subscription events on their behalf.
+    match /users/{uid}/prefs/analytics {
+      allow get: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['enabled'])
+        && request.resource.data.enabled is bool;
+    }
+
+    // Business allow-list. A user may only check for their own address;
+    // entries are added and removed in the Firebase console.
+    match /comp/{email} {
+      allow get: if signedIn()
+        && request.auth.token.get('email_verified', false) == true
+        && 'email' in request.auth.token
+        && request.auth.token.email.lower() == email;
+      allow list, write: if false;
+    }
+
+    // Subscription state. Written only by Cloud Functions (functions/billing.js).
+    match /billing/{uid} {
+      allow get: if isOwner(uid);
+      allow list, write: if false;
+    }
+  }
+}
