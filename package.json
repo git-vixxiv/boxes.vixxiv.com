@@ -6,7 +6,8 @@
     "test": "npm run test:unit && npm run test:rules && npm run test:ui",
     "test:unit": "node --test tests/entitlement.test.mjs tests/functions.test.mjs",
     "test:rules": "firebase emulators:exec --only firestore --project demo-boxes \"node --test tests/rules.test.mjs tests/billing.test.mjs\"",
-    "test:ui": "node --test tests/ui.test.mjs"
+    "test:ui": "node --test tests/ui.test.mjs",
+    "test:sandbox": "firebase emulators:exec --only firestore --project demo-boxes \"NODE_USE_ENV_PROXY=1 node tests/sandbox.mjs\""
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^3.0.4",

@@ -66,7 +66,8 @@ same environment; that creates a duplicate plan.
     firebase functions:secrets:set SQUARE_WEBHOOK_SIGNATURE_KEY
     firebase deploy --only functions
 
-The deploy asks for the remaining settings:
+The remaining settings are not secret and live in `functions/.env`, which is
+committed with the **sandbox** values already filled in:
 
 | Setting | Value |
 |---|---|
@@ -76,9 +77,6 @@ The deploy asks for the remaining settings:
 | `SQUARE_WEBHOOK_URL` | the `squareWebhook` function's URL, exactly as registered in Square |
 | `AMPLITUDE_API_KEY` | the Boxes Amplitude project key (optional) |
 
-The signature key and webhook URL are only known after the next step, so the
-first deploy can leave them blank; set them and deploy again.
-
 ### 5. Register the webhook in Square
 Developer Dashboard > Webhooks > add a subscription pointing at the
 `squareWebhook` URL, for these events:
@@ -86,8 +84,9 @@ Developer Dashboard > Webhooks > add a subscription pointing at the
 - `subscription.created`, `subscription.updated`
 - `invoice.payment_made`, `invoice.scheduled_charge_failed`
 
-Copy its signature key into the `SQUARE_WEBHOOK_SIGNATURE_KEY` secret, set
-`SQUARE_WEBHOOK_URL`, and redeploy the functions.
+Its signature key is the `SQUARE_WEBHOOK_SIGNATURE_KEY` secret, and its URL
+must match `SQUARE_WEBHOOK_URL` in `functions/.env` character for character.
+If the webhook is registered before the first deploy, one deploy is enough.
 
 ### 6. Fill in `billing-config.js`
 - `square.applicationId` and `square.locationId`
@@ -159,7 +158,22 @@ Events: `session_started`, `trial_started`, `trial_expired`, `box_created`,
 - Privacy policy and terms pages.
 - In-app "delete my account and data".
 - An "update my card" screen, and undoing a cancellation before it takes effect.
-- Nothing has been run against real Square (sandbox or production), the
-  deployed functions and rules, or Amplitude. The Square request formats are
-  written from Square's API reference and the identity hub's working code,
-  and are checked only against a stand-in. Step 8 is where that gets proven.
+- The deployed functions, the webhook delivery, the deployed rules, Square's
+  real card form in a browser, and Amplitude have not been exercised. Step 8
+  is where that gets proven.
+
+## What has been proven against real Square (sandbox)
+
+`npm run test:sandbox` drives the same billing code the functions run against
+Square's sandbox. On 2026-11-21 it passed: plan creation, customer and card
+creation, monthly and yearly subscriptions with the first payment taken,
+refusing a second subscription, cancelling with access to the paid-through
+date, and Square's own cancelled record replayed through the webhook handler.
+
+Two things it showed that are worth knowing:
+
+- Square takes the first payment a few seconds after the subscription is
+  created, so the renewal date appears shortly after subscribing, not instantly.
+- Square deactivates a subscription within seconds, before charging, if the
+  customer's email is at a placeholder domain such as example.com. Real
+  sign-in addresses are unaffected; the webhook ends access if it ever happens.
