@@ -219,7 +219,6 @@ function handleAuthStateChange(user) {
             user,
             onChange: renderEntitlement
         });
-        handleCheckoutReturn();
 
         // Refresh data from Firebase
         refreshData();
@@ -553,6 +552,13 @@ function ensureCanWrite(reason) {
     return false;
 }
 
+let selectedPlan = null;
+
+function showPaywallStep(step) {
+    document.getElementById('paywallPlans').classList.toggle('hidden', step !== 'plans');
+    document.getElementById('paywallPay').classList.toggle('hidden', step !== 'pay');
+}
+
 function openPaywall(reason) {
     const expired = entitlement.current.state === 'expired';
     document.getElementById('paywallTitle').textContent =
@@ -560,31 +566,149 @@ function openPaywall(reason) {
     document.getElementById('paywallIntro').textContent = expired
         ? 'Everything you saved is still here to view, search and export. Subscribe to keep adding and updating.'
         : 'Keep adding and updating your inventory after your free trial.';
+    showPaywallStep('plans');
     document.getElementById('paywallModal').classList.remove('hidden');
     analytics.track('paywall_shown', { reason, plan_state: entitlement.current.state });
+}
+
+function closePaywall() {
+    document.getElementById('paywallModal').classList.add('hidden');
+    entitlement.destroyCardForm();
+}
+
+function showPayError(message) {
+    const el = document.getElementById('payError');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+}
+
+async function selectPlan(planKey) {
+    const plan = BILLING.plans[planKey];
+    selectedPlan = planKey;
+    analytics.track('checkout_started', { plan: planKey });
+
+    const submit = document.getElementById('paySubmitBtn');
+    document.getElementById('paySummary').textContent = `${plan.label}: ${plan.price} ${plan.period}`;
+    submit.textContent = `Subscribe for ${plan.price}`;
+    submit.disabled = true;
+    showPayError('');
+    showPaywallStep('pay');
+
+    try {
+        await entitlement.mountCardForm('#cardContainer');
+        submit.disabled = false;
+    } catch (error) {
+        analytics.track('checkout_failed', { plan: planKey, stage: 'form' });
+        showPaywallStep('plans');
+        showToast(error.message, 'error');
+    }
+}
+
+async function submitPayment() {
+    const submit = document.getElementById('paySubmitBtn');
+    const label = submit.textContent;
+    submit.disabled = true;
+    submit.textContent = 'Processing...';
+    showPayError('');
+    try {
+        await entitlement.subscribe(selectedPlan);
+        analytics.track('checkout_completed', { plan: selectedPlan });
+        closePaywall();
+        showToast('You are subscribed. Thank you!', 'success');
+    } catch (error) {
+        analytics.track('checkout_failed', { plan: selectedPlan, stage: 'payment' });
+        showPayError(error.message);
+    } finally {
+        submit.disabled = false;
+        submit.textContent = label;
+    }
+}
+
+function formatDay(value) {
+    if (!value) return '';
+    // "YYYY-MM-DD" from Square, or a time in ms.
+    const date = typeof value === 'string' ? new Date(`${value}T12:00:00`) : new Date(value);
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function renderSubscriptionModal() {
+    const billing = entitlement.billing || {};
+    const plan = BILLING.plans[billing.plan];
+    const lines = [plan ? `${plan.label} plan: ${plan.price} ${plan.period}` : 'Boxes subscription'];
+    if (billing.cancelRequested) {
+        lines.push(`Cancelled. You keep full access until ${formatDay(entitlement.endsAt())}.`);
+    } else if (billing.status === 'past_due') {
+        lines.push('Your last payment did not go through. Square will try the card again. If it keeps failing, the subscription ends and your inventory becomes read-only.');
+    } else if (billing.chargedThrough) {
+        lines.push(`Renews on ${formatDay(billing.chargedThrough)}.`);
+    }
+    const details = document.getElementById('subscriptionDetails');
+    details.innerHTML = '';
+    for (const line of lines) {
+        const p = document.createElement('p');
+        p.textContent = line;
+        details.appendChild(p);
+    }
+    document.getElementById('cancelSubscriptionBtn')
+        .classList.toggle('hidden', !!billing.cancelRequested);
+}
+
+function openSubscriptionModal() {
+    renderSubscriptionModal();
+    document.getElementById('subscriptionModal').classList.remove('hidden');
+}
+
+async function handleCancelSubscription() {
+    if (!confirm('Cancel your subscription? You keep full access until the end of the period you have already paid for.')) {
+        return;
+    }
+    const button = document.getElementById('cancelSubscriptionBtn');
+    button.disabled = true;
+    try {
+        const endsAt = await entitlement.cancel();
+        analytics.track('subscription_cancel_clicked');
+        showToast(`Subscription cancelled. Access continues until ${formatDay(endsAt)}.`, 'success');
+    } catch (error) {
+        showToast(error.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
 }
 
 function renderEntitlement(current, previous) {
     const banner = document.getElementById('planBanner');
     const text = document.getElementById('planBannerText');
+    const bannerBtn = document.getElementById('planBannerBtn');
     const subscribeMenu = document.getElementById('subscribeMenuBtn');
     const manageMenu = document.getElementById('manageSubscriptionBtn');
     const signedIn = useFirebase;
+    const subscribed = signedIn && current.state === 'subscribed';
+    const pastDue = subscribed && entitlement.billing?.status === 'past_due';
+    const needsPlan = signedIn && (current.state === 'trial' || current.state === 'expired');
 
-    const showBanner = signedIn && (current.state === 'trial' || current.state === 'expired');
-    banner.classList.toggle('hidden', !showBanner);
-    banner.classList.toggle('expired', current.state === 'expired');
-    if (current.state === 'trial') {
+    banner.classList.toggle('hidden', !(needsPlan || pastDue));
+    banner.classList.toggle('expired', current.state === 'expired' || pastDue);
+    bannerBtn.textContent = pastDue ? 'Details' : 'Subscribe';
+    if (pastDue) {
+        text.textContent = 'Your last payment did not go through.';
+    } else if (current.state === 'trial') {
         const days = current.trialDaysLeft;
         text.textContent = days === 1
             ? 'Free trial: last day'
             : `Free trial: ${days} days left`;
     } else if (current.state === 'expired') {
-        text.textContent = 'Free trial ended. Your inventory is read-only.';
+        text.textContent = entitlement.billing?.squareSubscriptionId
+            ? 'Your subscription has ended. Your inventory is read-only.'
+            : 'Free trial ended. Your inventory is read-only.';
     }
 
-    subscribeMenu.classList.toggle('hidden', !showBanner);
-    manageMenu.classList.toggle('hidden', !(signedIn && current.state === 'subscribed'));
+    subscribeMenu.classList.toggle('hidden', !needsPlan);
+    manageMenu.classList.toggle('hidden', !subscribed);
+
+    if (!document.getElementById('subscriptionModal').classList.contains('hidden')) {
+        if (subscribed) renderSubscriptionModal();
+        else document.getElementById('subscriptionModal').classList.add('hidden');
+    }
 
     if (entitlement.trialJustStarted && current.state === 'trial') {
         entitlement.trialJustStarted = false;
@@ -593,48 +717,6 @@ function renderEntitlement(current, previous) {
     if (previous && previous.state === 'trial' && current.state === 'expired') {
         analytics.track('trial_expired');
     }
-    if (previous && previous.state !== 'loading' && previous.state !== 'subscribed'
-        && current.state === 'subscribed') {
-        document.getElementById('paywallModal').classList.add('hidden');
-        showToast('You are subscribed. Thank you!', 'success');
-    }
-}
-
-async function handleSubscribe(planKey, button) {
-    analytics.track('checkout_started', { plan: planKey });
-    analytics.flush(); // the page is about to leave for Stripe
-    const label = button.innerHTML;
-    button.disabled = true;
-    button.textContent = 'Opening checkout...';
-    try {
-        await entitlement.startCheckout(planKey);
-    } catch (error) {
-        analytics.track('checkout_failed', { plan: planKey });
-        showToast(error.message, 'error');
-        button.disabled = false;
-        button.innerHTML = label;
-    }
-}
-
-async function handleManageSubscription() {
-    showToast('Opening your subscription...');
-    try {
-        await entitlement.openPortal();
-    } catch (error) {
-        showToast('Could not open your subscription: ' + error.message, 'error');
-    }
-}
-
-function handleCheckoutReturn() {
-    const params = new URLSearchParams(window.location.search);
-    const result = params.get('checkout');
-    if (!result) return;
-    if (result === 'success') {
-        showToast('Payment received. Activating your subscription...', 'success');
-    } else {
-        analytics.track('checkout_cancelled');
-    }
-    history.replaceState(null, '', window.location.pathname);
 }
 
 function initBilling() {
@@ -644,13 +726,22 @@ function initBilling() {
         button.querySelector('.plan-name').textContent = plan.label;
         button.querySelector('.plan-price').textContent = `${plan.price} ${plan.period}`;
         button.querySelector('.plan-note').textContent = plan.note || '';
-        button.addEventListener('click', () => handleSubscribe(key, button));
+        button.addEventListener('click', () => selectPlan(key));
     }
     document.getElementById('paywallUnavailable')
         .classList.toggle('hidden', isBillingConfigured());
 
-    document.getElementById('planBannerBtn')
-        .addEventListener('click', () => openPaywall('banner'));
+    document.getElementById('payBackBtn').addEventListener('click', () => {
+        entitlement.destroyCardForm();
+        showPaywallStep('plans');
+    });
+    document.getElementById('paySubmitBtn').addEventListener('click', submitPayment);
+    document.getElementById('paywallCloseBtn').addEventListener('click', closePaywall);
+
+    document.getElementById('planBannerBtn').addEventListener('click', () => {
+        if (entitlement.current.state === 'subscribed') openSubscriptionModal();
+        else openPaywall('banner');
+    });
     document.getElementById('subscribeMenuBtn').addEventListener('click', (e) => {
         e.preventDefault();
         elements.menu.classList.add('hidden');
@@ -659,8 +750,10 @@ function initBilling() {
     document.getElementById('manageSubscriptionBtn').addEventListener('click', (e) => {
         e.preventDefault();
         elements.menu.classList.add('hidden');
-        handleManageSubscription();
+        openSubscriptionModal();
     });
+    document.getElementById('cancelSubscriptionBtn')
+        .addEventListener('click', handleCancelSubscription);
     document.querySelectorAll('.trial-days').forEach(el => {
         el.textContent = BILLING.trialDays;
     });

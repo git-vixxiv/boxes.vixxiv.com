@@ -481,9 +481,9 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h3 id="paywallTitle">Subscribe to Boxes</h3>
-                    <button class="close-btn" data-close="paywallModal">&times;</button>
+                    <button id="paywallCloseBtn" type="button" class="close-btn" aria-label="Close">&times;</button>
                 </div>
-                <div class="paywall-body">
+                <div id="paywallPlans" class="paywall-body">
                     <p id="paywallIntro"></p>
                     <div class="plan-options">
                         <button type="button" class="plan-option featured" data-plan="yearly">
@@ -499,6 +499,33 @@
                     </div>
                     <p id="paywallUnavailable" class="form-help hidden">Subscriptions are not open yet.</p>
                     <p class="form-help">Cancel any time. Your inventory stays viewable and exportable either way.</p>
+                </div>
+                <div id="paywallPay" class="paywall-body hidden">
+                    <p id="paySummary" class="pay-summary"></p>
+                    <div id="cardContainer" class="card-container"></div>
+                    <p id="payError" class="pay-error hidden" role="alert"></p>
+                    <div class="form-actions">
+                        <button id="payBackBtn" type="button" class="secondary-btn">Back</button>
+                        <button id="paySubmitBtn" type="button" class="primary-btn">Subscribe</button>
+                    </div>
+                    <p class="form-help">Payments are handled by Square. Renews automatically until you cancel.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Manage subscription -->
+        <div id="subscriptionModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Your Subscription</h3>
+                    <button class="close-btn" data-close="subscriptionModal" aria-label="Close">&times;</button>
+                </div>
+                <div class="paywall-body">
+                    <div id="subscriptionDetails"></div>
+                    <div class="form-actions">
+                        <button id="cancelSubscriptionBtn" type="button" class="secondary-btn danger">Cancel Subscription</button>
+                        <button type="button" class="secondary-btn" data-close="subscriptionModal">Close</button>
+                    </div>
                 </div>
             </div>
         </div>

@@ -1458,3 +1458,34 @@ body {
     gap: 0.5rem;
     margin-top: 0.75rem;
 }
+
+/* Card payment step */
+.pay-summary {
+    font-weight: 600;
+    color: var(--gray-800);
+    margin-bottom: 0.75rem;
+}
+
+.card-container {
+    min-height: 90px;
+    color: var(--gray-500);
+    font-size: 0.875rem;
+}
+
+.pay-error {
+    color: var(--danger-dark);
+    background: #fef2f2;
+    border-radius: var(--radius);
+    padding: 0.5rem 0.75rem;
+    margin: 0.5rem 0;
+    font-size: 0.875rem;
+}
+
+#subscriptionDetails p {
+    margin-bottom: 0.75rem;
+    color: var(--gray-700);
+}
+
+.card-container:empty::before {
+    content: 'Loading payment form...';
+}

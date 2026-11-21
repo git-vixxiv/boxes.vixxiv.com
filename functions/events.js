@@ -1,51 +1,33 @@
 /**
- * Turns a change to a Stripe subscription record (as written by the
- * firestore-stripe-payments extension) into at most one analytics event.
+ * Turns a change to a user's billing record into at most one analytics event.
  * Pure: no Firebase, no network.
  */
 
-const ACTIVE = ['active', 'trialing'];
-
-function seconds(value) {
-    if (!value) return null;
-    if (typeof value.seconds === 'number') return value.seconds;
-    if (typeof value.toMillis === 'function') return Math.floor(value.toMillis() / 1000);
-    return null;
-}
-
-function planInterval(sub) {
-    const price = sub?.items?.[0]?.price;
-    return price?.recurring?.interval || price?.interval || 'unknown';
-}
-
-export function subscriptionEvent(before, after, subscriptionId) {
+export function subscriptionEvent(before, after, uid) {
     if (!after) return null;
 
-    const wasActive = !!before && ACTIVE.includes(before.status);
-    const isActive = ACTIVE.includes(after.status);
-    const period = seconds(after.current_period_start);
-    const base = { plan_interval: planInterval(after) };
+    const wasActive = !!before?.active;
+    const isActive = !!after.active;
+    const subscription = after.squareSubscriptionId || 'none';
     const event = (type, key, extra = {}) => ({
         event_type: type,
-        insert_id: `${subscriptionId}:${type}:${key}`,
-        event_properties: { ...base, ...extra }
+        insert_id: `${uid}:${subscription}:${type}:${key}`,
+        event_properties: { plan: after.plan || 'unknown', ...extra }
     });
 
-    if (isActive && !wasActive) return event('subscription_started', period);
-    if (wasActive && !isActive) {
-        return event('subscription_ended', after.status, { final_status: after.status });
+    if (isActive && !wasActive) return event('subscription_started', after.chargedThrough);
+    if (wasActive && !isActive) return event('subscription_ended', 'end');
+    if (!isActive) return null;
+
+    if (after.cancelRequested && !before.cancelRequested) {
+        return event('subscription_cancel_requested', after.chargedThrough);
     }
-    if (isActive && wasActive) {
-        if (after.cancel_at_period_end && !before.cancel_at_period_end) {
-            return event('subscription_cancel_requested', period);
-        }
-        if (!after.cancel_at_period_end && before.cancel_at_period_end) {
-            return event('subscription_cancel_reversed', period);
-        }
-        const previousPeriod = seconds(before.current_period_start);
-        if (period && previousPeriod && period > previousPeriod) {
-            return event('subscription_renewed', period);
-        }
+    if (after.status === 'past_due' && before.status !== 'past_due') {
+        return event('subscription_payment_failed', after.chargedThrough);
+    }
+    if (after.chargedThrough && before.chargedThrough
+        && after.chargedThrough > before.chargedThrough) {
+        return event('subscription_renewed', after.chargedThrough);
     }
     return null;
 }

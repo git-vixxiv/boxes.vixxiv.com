@@ -18,56 +18,103 @@ under the same Google sign-in.
 The rule lives in two places that must agree: `firestore.rules` (the server,
 which is what actually enforces it) and `entitlement-core.js` (the UI).
 
+## How payment works
+
+Payments run on Square. The card form in the app is Square's own, so card
+numbers never touch Boxes. A Cloud Function creates the Square customer, saves
+the card and starts the subscription; Square then tells the `squareWebhook`
+function about renewals, failed payments and endings. Everything is recorded
+on one server-owned document, `billing/{uid}`, which the app can read but not
+write.
+
+- **Cancelling** stops renewal. Access continues to the end of the period
+  already paid for, then the inventory becomes read-only.
+- **A failed renewal** shows a notice but keeps access while Square retries
+  the card. If the retries run out, Square ends the subscription.
+- There is no "update my card" screen yet. Someone whose card has expired
+  subscribes again with the new card once the old subscription has ended.
+- There is no trial in Square. The 7-day trial is tracked by the app, before
+  any card exists.
+
 ## One-time setup
 
 ### 1. Firebase plan
-Move `boxes-ffa31` to the Blaze (pay-as-you-go) plan. The Stripe extension and
-Cloud Functions need it.
+Move `boxes-ffa31` to the Blaze (pay-as-you-go) plan. Cloud Functions need it.
 
-### 2. Stripe
-1. Create or pick the Stripe account and finish identity verification.
-2. Create one product, "Boxes", and add metadata `firebaseRole` = `subscriber`.
-   The database rules look for exactly that value.
-3. Add two recurring prices to it: $3.99 monthly and $29.99 yearly.
-4. Do **not** add a trial in Stripe. The trial is tracked by the app, before
-   any card exists.
+### 2. Square application
+In the Square Developer Dashboard, create an application for Boxes (or reuse
+one). You need, for **sandbox first** and later for production:
 
-### 3. Stripe extension
-Install "Run Payments with Stripe" (`invertase/firestore-stripe-payments`):
+- Application ID (public; goes in `billing-config.js`)
+- Location ID (public; goes in `billing-config.js` and the functions)
+- Access token (secret; functions only, never in the repo or in chat)
 
-- Products collection: `products`
-- Customer collection: `customers`
-- Sync new users to Stripe: off (customers are created at first checkout)
-- Region: `us-central1` (or change `functionsRegion` in `billing-config.js`)
+### 3. Create the subscription plan in Square
+Run once per environment. It creates "Boxes" with a $3.99 monthly and a
+$29.99 yearly variation and prints their ids:
 
-Follow the extension's post-install steps to add its webhook in Stripe and
-enable the customer portal (allow cancelling and updating the card).
+    cd functions
+    SQUARE_ENVIRONMENT=sandbox SQUARE_ACCESS_TOKEN=... node scripts/setup-plans.js
 
-### 4. Fill in `billing-config.js`
-- `stripePriceId` for each plan (they start with `price_`)
+Production also needs `CONFIRM_PRODUCTION=yes`. Do not run it twice in the
+same environment; that creates a duplicate plan.
+
+### 4. Deploy the functions
+
+    cd functions && npm install && cd ..
+    firebase functions:secrets:set SQUARE_ACCESS_TOKEN
+    firebase functions:secrets:set SQUARE_WEBHOOK_SIGNATURE_KEY
+    firebase deploy --only functions
+
+The deploy asks for the remaining settings:
+
+| Setting | Value |
+|---|---|
+| `SQUARE_ENVIRONMENT` | `sandbox`, later `production` |
+| `SQUARE_LOCATION_ID` | from step 2 |
+| `SQUARE_PLAN_MONTHLY`, `SQUARE_PLAN_YEARLY` | printed by step 3 |
+| `SQUARE_WEBHOOK_URL` | the `squareWebhook` function's URL, exactly as registered in Square |
+| `AMPLITUDE_API_KEY` | the Boxes Amplitude project key (optional) |
+
+The signature key and webhook URL are only known after the next step, so the
+first deploy can leave them blank; set them and deploy again.
+
+### 5. Register the webhook in Square
+Developer Dashboard > Webhooks > add a subscription pointing at the
+`squareWebhook` URL, for these events:
+
+- `subscription.created`, `subscription.updated`
+- `invoice.payment_made`, `invoice.scheduled_charge_failed`
+
+Copy its signature key into the `SQUARE_WEBHOOK_SIGNATURE_KEY` secret, set
+`SQUARE_WEBHOOK_URL`, and redeploy the functions.
+
+### 6. Fill in `billing-config.js`
+- `square.applicationId` and `square.locationId`
+- `square.environment`: must match the functions' `SQUARE_ENVIRONMENT`
 - `amplitudeApiKey` from a new Amplitude project for Boxes
 
-Until the price ids are filled in, the paywall says subscriptions are not open
-and no checkout can start. Until the Amplitude key is filled in, nothing is
+Until the Square ids are filled in, the paywall says subscriptions are not
+open and no card form loads. Until the Amplitude key is filled in, nothing is
 tracked.
 
-### 5. Allow-list
+### 7. Allow-list
 In the Firebase console, create a `comp` collection. Each document's id is a
 lower-case email address (the fields do not matter). **Add your own address
 before deploying the rules**, or your account becomes read-only when its trial
 ends.
 
-### 6. Subscription events (optional, recommended)
-`functions/` reports subscription started / renewed / cancelled / ended to
-Amplitude from the server. Set `AMPLITUDE_API_KEY` when deploying:
-
-    cd functions && npm install && cd ..
-    firebase deploy --only functions
+### 8. Test in sandbox before switching to production
+With everything pointed at sandbox, subscribe using Square's test card
+(4111 1111 1111 1111, any future date, any CVV), check the account unlocks,
+then cancel and check the end date shows. Only then repeat steps 2 to 6 with
+production values.
 
 ## Going live, in this order
 
-1. Merge `paid-launch` and let the app deploy.
-2. Then deploy the rules: `firebase deploy --only firestore:rules`.
+1. Deploy the functions (step 4 above).
+2. Merge `paid-launch` and let the app deploy.
+3. Then deploy the rules: `firebase deploy --only firestore:rules`.
 
 The order matters. The new rules only allow saving for accounts with a trial,
 a subscription or an allow-list entry, and only the new app starts the trial.
@@ -91,18 +138,19 @@ Events: `session_started`, `trial_started`, `trial_expired`, `box_created`,
 `item_created`, `item_updated`, `item_checked_out`, `item_checked_in`,
 `search_used`, `bulk_import_completed`, `backup_imported`, `data_exported`,
 `voice_input_started`, `voice_input_transcribed`, `voice_input_failed`,
-`paywall_shown`, `checkout_started`, `checkout_failed`, `checkout_cancelled`,
-and from the server `subscription_started`, `subscription_renewed`,
-`subscription_cancel_requested`, `subscription_cancel_reversed`,
-`subscription_ended`.
+`paywall_shown`, `checkout_started`, `checkout_completed`, `checkout_failed`,
+`subscription_cancel_clicked`, and from the server `subscription_started`,
+`subscription_renewed`, `subscription_payment_failed`,
+`subscription_cancel_requested`, `subscription_ended`.
 
 ## Tests
 
     npm install
     npm test
 
-- `test:unit` - trial/subscription logic and subscription-event mapping
-- `test:rules` - the database rules, against the Firestore emulator (needs Java)
+- `test:unit` - trial logic, event mapping, webhook signatures, Square request shapes
+- `test:rules` - the database rules and the billing logic, against the
+  Firestore emulator with a stand-in for Square (needs Java)
 - `test:ui` - the real app in Chromium against a simulated backend (needs Playwright)
 
 ## Not done yet
@@ -110,5 +158,8 @@ and from the server `subscription_started`, `subscription_renewed`,
 - Photos still live inside the database records; moving them to Cloud Storage.
 - Privacy policy and terms pages.
 - In-app "delete my account and data".
-- Stripe, the extension, the deployed rules and Amplitude have not been
-  exercised end to end; that needs the accounts above.
+- An "update my card" screen, and undoing a cancellation before it takes effect.
+- Nothing has been run against real Square (sandbox or production), the
+  deployed functions and rules, or Amplitude. The Square request formats are
+  written from Square's API reference and the identity hub's working code,
+  and are checked only against a stand-in. Step 8 is where that gets proven.

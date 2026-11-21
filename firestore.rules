@@ -5,7 +5,7 @@ rules_version = '2';
 // Access model (mirrored for the UI in entitlement-core.js):
 //   - Everyone can always read, export and delete their own inventory.
 //   - Adding or changing items and boxes needs one of:
-//       an active subscription   (Stripe extension sets the stripeRole claim)
+//       an active subscription   (billing/{uid}, written only by the server)
 //       an unexpired free trial  (users/{uid}.trialStartedAt + 7 days)
 //       a business allow-list    (comp/{email}, managed in the console)
 service cloud.firestore {
@@ -19,8 +19,13 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == uid;
     }
 
-    function isSubscriber() {
-      return request.auth.token.get('stripeRole', '') == 'subscriber';
+    // After a cancellation the subscription stays active until the paid
+    // period ends; endsAt carries that date.
+    function isSubscriber(uid) {
+      let billing = get(/databases/$(database)/documents/billing/$(uid));
+      return billing != null
+        && billing.data.get('active', false) == true
+        && (billing.data.get('endsAt', null) == null || request.time < billing.data.endsAt);
     }
 
     function isComped() {
@@ -37,7 +42,7 @@ service cloud.firestore {
     }
 
     function canWrite(uid) {
-      return isSubscriber() || inTrial(uid) || isComped();
+      return isSubscriber(uid) || inTrial(uid) || isComped();
     }
 
     // Profile: holds the trial start. Written once, stamped by the server
@@ -78,30 +83,10 @@ service cloud.firestore {
       allow list, write: if false;
     }
 
-    // Stripe extension (firestore-stripe-payments).
-    match /customers/{uid} {
-      allow read: if isOwner(uid);
-
-      match /checkout_sessions/{id} {
-        allow read, create: if isOwner(uid);
-      }
-      match /subscriptions/{id} {
-        allow read: if isOwner(uid);
-      }
-      match /payments/{id} {
-        allow read: if isOwner(uid);
-      }
-    }
-
-    match /products/{id} {
-      allow read: if true;
-
-      match /prices/{id} {
-        allow read: if true;
-      }
-      match /tax_rates/{id} {
-        allow read: if true;
-      }
+    // Subscription state. Written only by Cloud Functions (functions/billing.js).
+    match /billing/{uid} {
+      allow get: if isOwner(uid);
+      allow list, write: if false;
     }
   }
 }

@@ -119,10 +119,6 @@ export async function addDoc(col, data) {
     const id = 'doc' + Math.random().toString(36).slice(2, 10);
     const path = `${col.path}/${id}`;
     write(path, data, false);
-    // Stand-in for the Stripe extension answering a checkout session.
-    if (/\/checkout_sessions\//.test(path) && fake.checkoutUrl !== null) {
-        setTimeout(() => write(path, { url: fake.checkoutUrl || 'https://checkout.stripe.test/pay' }, true), 50);
-    }
     return { path, id };
 }
 export function writeBatch() {
@@ -149,10 +145,30 @@ export function onSnapshot(target, cb) {
 
 // ---------- functions ----------
 export function getFunctions(app, region) { return { region }; }
+// Stand-ins for the Cloud Functions in functions/index.js.
+const serverFunctions = {
+    async createSubscription({ plan, token }) {
+        if (token === 'cnon:declined') {
+            const err = new Error('Card declined.');
+            err.code = 'functions/failed-precondition';
+            throw err;
+        }
+        write(`billing/${fake.user.uid}`, {
+            active: true, status: 'active', plan, cancelRequested: false, endsAt: null,
+            chargedThrough: '2027-11-21', squareSubscriptionId: 'SUB_1'
+        }, true);
+        return { plan, subscriptionId: 'SUB_1' };
+    },
+    async cancelSubscription() {
+        const endsAt = Date.UTC(2027, 10, 21, 23, 59, 59);
+        write(`billing/${fake.user.uid}`, { cancelRequested: true, endsAt: ts(endsAt) }, true);
+        return { endsAt };
+    }
+};
 export function httpsCallable(functions, name) {
     return async (data) => {
         fake.calls = fake.calls || [];
         fake.calls.push({ name, region: functions.region, data });
-        return { data: { url: 'https://billing.stripe.test/portal' } };
+        return { data: await serverFunctions[name](data) };
     };
 }

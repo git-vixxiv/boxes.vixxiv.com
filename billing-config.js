@@ -1,8 +1,9 @@
 /**
  * Boxes - billing and analytics settings.
  *
- * Everything here is safe to ship in the browser: Stripe price ids and the
- * Amplitude API key are public identifiers, not secrets.
+ * Everything here is safe to ship in the browser: the Square application id,
+ * location id and the Amplitude API key are public identifiers, not secrets.
+ * The Square access token lives only in Cloud Functions.
  * See docs/PAID-LAUNCH.md for where each value comes from.
  */
 
@@ -13,20 +14,28 @@ export const BILLING = {
         monthly: {
             label: 'Monthly',
             price: '$3.99',
-            period: 'per month',
-            // Stripe price id, e.g. "price_1AbC...". Leave as-is until Stripe is set up.
-            stripePriceId: 'STRIPE_MONTHLY_PRICE_ID'
+            period: 'per month'
         },
         yearly: {
             label: 'Yearly',
             price: '$29.99',
             period: 'per year',
-            note: 'Save 37%',
-            stripePriceId: 'STRIPE_YEARLY_PRICE_ID'
+            note: 'Save 37%'
         }
     },
 
-    // Region the Stripe extension's functions were installed in.
+    square: {
+        // "sandbox" for testing, "production" for real cards. Must match the
+        // SQUARE_ENVIRONMENT the functions are deployed with.
+        environment: 'sandbox',
+        // Square Developer Dashboard > your application > Credentials.
+        // Sandbox ids start with "sandbox-sq0idb-", production with "sq0idp-".
+        applicationId: '',
+        // Square Developer Dashboard > Locations.
+        locationId: ''
+    },
+
+    // Region the Cloud Functions are deployed in.
     functionsRegion: 'us-central1'
 };
 
@@ -38,5 +47,5 @@ export const ANALYTICS = {
 };
 
 export function isBillingConfigured() {
-    return Object.values(BILLING.plans).every(p => p.stripePriceId.startsWith('price_'));
+    return !!(BILLING.square.applicationId && BILLING.square.locationId);
 }

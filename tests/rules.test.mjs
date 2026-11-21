@@ -45,7 +45,7 @@ test('signed-out users can read and write nothing', async () => {
 test('a user cannot touch another user\'s inventory', async () => {
     await seed(trialStarted(1));
     await seed(db => setDoc(doc(db, 'users/alice/items/i1'), item));
-    const bob = asUser('bob', { stripeRole: 'subscriber' });
+    const bob = asUser('bob');
     await assertFails(getDoc(doc(bob, 'users/alice/items/i1')));
     await assertFails(getDocs(collection(bob, 'users/alice/items')));
     await assertFails(setDoc(doc(bob, 'users/alice/items/i2'), item));
@@ -92,12 +92,50 @@ test('trial expired: read-only, but export and delete still work', async () => {
     await assertSucceeds(deleteDoc(doc(db, 'users/alice/items/i1')));
 });
 
+const billing = (data) => (db) => setDoc(doc(db, 'billing/alice'), data);
+
 test('subscriber: full access after the trial has ended', async () => {
     await seed(trialStarted(400));
-    const db = asUser('alice', { stripeRole: 'subscriber' });
+    await seed(billing({ active: true, status: 'active', endsAt: null }));
+    const db = asUser('alice');
     await assertSucceeds(setDoc(doc(db, 'users/alice/items/i1'), item));
     await assertSucceeds(updateDoc(doc(db, 'users/alice/items/i1'), { name: 'Mallet' }));
-    await assertFails(setDoc(doc(asUser('alice', { stripeRole: 'other' }), 'users/alice/items/i2'), item));
+});
+
+test('subscriber: past due keeps access while Square retries', async () => {
+    await seed(trialStarted(400));
+    await seed(billing({ active: true, status: 'past_due' }));
+    await assertSucceeds(setDoc(doc(asUser('alice'), 'users/alice/items/i1'), item));
+});
+
+test('cancelled: access runs to the end of the paid period, then stops', async () => {
+    await seed(trialStarted(400));
+    await seed(billing({ active: true, cancelRequested: true, endsAt: Timestamp.fromMillis(Date.now() + DAY) }));
+    await assertSucceeds(setDoc(doc(asUser('alice'), 'users/alice/items/i1'), item));
+
+    await seed(billing({ active: true, cancelRequested: true, endsAt: Timestamp.fromMillis(Date.now() - 1000) }));
+    await assertFails(setDoc(doc(asUser('alice'), 'users/alice/items/i2'), item));
+    await assertSucceeds(getDoc(doc(asUser('alice'), 'users/alice/items/i1')));
+});
+
+test('ended or half-finished billing records grant nothing', async () => {
+    await seed(trialStarted(400));
+    for (const data of [{ active: false, status: 'canceled' }, { squareCustomerId: 'C', checkoutStartedAt: 1 }]) {
+        await seed(billing(data));
+        await assertFails(setDoc(doc(asUser('alice'), 'users/alice/items/i1'), item));
+    }
+});
+
+test('billing record: owner can read it, nobody can write it from the app', async () => {
+    await seed(billing({ active: false }));
+    const db = asUser('alice');
+    await assertSucceeds(getDoc(doc(db, 'billing/alice')));
+    await assertFails(setDoc(doc(db, 'billing/alice'), { active: true }));
+    await assertFails(updateDoc(doc(db, 'billing/alice'), { active: true }));
+    await assertFails(deleteDoc(doc(db, 'billing/alice')));
+    await assertFails(setDoc(doc(asUser('bob'), 'billing/bob'), { active: true }));
+    await assertFails(getDoc(doc(asUser('bob'), 'billing/alice')));
+    await assertFails(getDocs(collection(db, 'billing')));
 });
 
 test('business allow-list: full access, verified email only', async () => {
@@ -119,15 +157,6 @@ test('business allow-list: full access, verified email only', async () => {
 test('only items and containers exist under a user', async () => {
     await seed(trialStarted(1));
     await assertFails(setDoc(doc(asUser('alice'), 'users/alice/other/x'), { a: 1 }));
-});
-
-test('billing: own checkout sessions and subscriptions only', async () => {
-    const db = asUser('alice');
-    await assertSucceeds(addDoc(collection(db, 'customers/alice/checkout_sessions'), { price: 'price_1' }));
-    await assertSucceeds(getDocs(collection(db, 'customers/alice/subscriptions')));
-    await assertFails(setDoc(doc(db, 'customers/alice/subscriptions/s1'), { status: 'active' }));
-    await assertFails(addDoc(collection(db, 'customers/bob/checkout_sessions'), { price: 'price_1' }));
-    await assertFails(getDocs(collection(db, 'customers/bob/subscriptions')));
 });
 
 test('analytics preference: own, boolean only, writable even when read-only', async () => {

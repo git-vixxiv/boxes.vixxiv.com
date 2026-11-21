@@ -56,8 +56,8 @@ async function open({ seed = {}, timezone = 'America/Chicago', configured = true
         let body = readFileSync(join(ROOT, 'billing-config.js'), 'utf8');
         if (configured) {
             body = body
-                .replace('STRIPE_MONTHLY_PRICE_ID', 'price_monthly')
-                .replace('STRIPE_YEARLY_PRICE_ID', 'price_yearly')
+                .replace("applicationId: ''", "applicationId: 'sandbox-sq0idb-test'")
+                .replace("locationId: ''", "locationId: 'LOC_TEST'")
                 .replace("amplitudeApiKey: ''", "amplitudeApiKey: 'test-key'");
         }
         route.fulfill({ contentType: 'text/javascript', body });
@@ -66,12 +66,16 @@ async function open({ seed = {}, timezone = 'America/Chicago', configured = true
         sent.push(...route.request().postDataJSON().events);
         route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
     });
-    await context.route('https://*.stripe.test/**', route => route.fulfill({ contentType: 'text/html', body: 'stripe' }));
+    const squareLoads = [];
+    await context.route('https://*.squarecdn.com/**', route => {
+        squareLoads.push(route.request().url());
+        route.fulfill({ contentType: 'text/javascript', body: readFileSync(join(ROOT, 'tests/ui/fake-square.js'), 'utf8') });
+    });
 
     await page.goto(origin + '/');
     const flush = async () => { await page.waitForTimeout(1300); return sent; };
     const store = (path) => page.evaluate(p => window.__fake.store.get(p), path);
-    return { page, context, sent, errors, flush, store };
+    return { page, context, sent, errors, flush, store, squareLoads };
 }
 
 async function addBox(page, name) {
@@ -111,12 +115,13 @@ test('new user: sign in starts a 7-day trial and everything works', async () => 
     await context.close();
 });
 
-test('expired trial: inventory is visible, changes open the paywall, checkout starts', async () => {
-    const { page, context, errors, flush, store } = await open({
+test('expired trial: inventory is visible, changes open the paywall, paying unlocks it', async () => {
+    const { page, context, errors, flush, store, squareLoads } = await open({
         seed: { user: USER, store: { ...trial(8), ...BIN, ...HAMMER } }
     });
     await page.waitForSelector('#planBanner.expired');
-    assert.match(await page.textContent('#planBannerText'), /read-only/);
+    assert.match(await page.textContent('#planBannerText'), /Free trial ended.*read-only/);
+    assert.equal(squareLoads.length, 0, 'Square is not loaded until someone goes to pay');
 
     // Still readable and searchable.
     await page.fill('#searchInput', 'hammer');
@@ -129,7 +134,7 @@ test('expired trial: inventory is visible, changes open the paywall, checkout st
         await page.waitForSelector('#paywallModal:not(.hidden)');
         assert.ok(await page.isHidden('#itemModal'));
         assert.ok(await page.isHidden('#containerModal'));
-        await page.click('#paywallModal .close-btn');
+        await page.click('#paywallCloseBtn');
     }
 
     await page.click('#planBannerBtn');
@@ -138,37 +143,119 @@ test('expired trial: inventory is visible, changes open the paywall, checkout st
     assert.match(await page.textContent('.plan-option[data-plan=monthly]'), /\$3\.99 per month/);
     assert.ok(await page.isHidden('#paywallUnavailable'));
 
-    const sessions = () => page.evaluate(() =>
-        [...window.__fake.store].filter(([p]) => p.includes('/checkout_sessions/')).map(([, d]) => d));
+    // Pick a plan, change your mind, pick the other.
+    await page.click('.plan-option[data-plan=monthly]');
+    await page.waitForSelector('#cardContainer .fake-card-form');
+    assert.equal(await page.textContent('#paySummary'), 'Monthly: $3.99 per month');
+    await page.click('#payBackBtn');
+    assert.equal(await page.locator('#cardContainer .fake-card-form').count(), 0);
     await page.click('.plan-option[data-plan=yearly]');
-    await page.waitForFunction(() => [...window.__fake.store.keys()].some(p => p.includes('/checkout_sessions/')));
-    const [session] = await sessions();
-    assert.equal(session.price, 'price_yearly');
-    assert.match(session.success_url, /\?checkout=success$/);
-    await page.waitForURL('https://checkout.stripe.test/pay');
+    await page.waitForSelector('#cardContainer .fake-card-form');
+    assert.equal(await page.textContent('#paySubmitBtn'), 'Subscribe for $29.99');
+    assert.match(squareLoads[0], /^https:\/\/sandbox\.web\.squarecdn\.com\/v1\/square\.js$/);
+    assert.deepEqual(await page.evaluate(() => window.__square.payments.at(-1)),
+        { applicationId: 'sandbox-sq0idb-test', locationId: 'LOC_TEST' });
+
+    await page.click('#paySubmitBtn');
+    await page.waitForSelector('#paywallModal', { state: 'hidden' });
+    await page.waitForSelector('#planBanner', { state: 'hidden' });
+    const call = await page.evaluate(() => window.__fake.calls.at(-1));
+    assert.equal(call.name, 'createSubscription');
+    assert.equal(call.region, 'us-central1');
+    assert.deepEqual(call.data, { plan: 'yearly', token: 'cnon:ok', verificationToken: 'verf:ok' });
+    assert.equal((await store('billing/u1')).active, true);
+
+    // Unlocked without a reload.
+    await addBox(page, 'After Paying');
 
     const types = (await flush()).map(e => e.event_type);
-    assert.ok(types.includes('paywall_shown') && types.includes('checkout_started'), String(types));
+    for (const expected of ['paywall_shown', 'checkout_started', 'checkout_completed']) {
+        assert.ok(types.includes(expected), `missing ${expected} in ${types}`);
+    }
     assert.deepEqual(errors, []);
     await context.close();
 });
 
-test('subscribing while the app is open unlocks it without a reload', async () => {
-    const { page, context, errors } = await open({ seed: { user: USER, store: { ...trial(30), ...BIN } } });
-    await page.waitForSelector('#planBanner.expired');
-    await page.evaluate(async () => {
-        const fb = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js');
-        await fb.setDoc(fb.doc({}, 'customers/u1/subscriptions/sub_1'), { status: 'active' });
-    });
-    await page.waitForSelector('#planBanner', { state: 'hidden' });
-    assert.equal(await page.evaluate(() => window.__fake.tokenRefreshes), 1);
-    await addBox(page, 'After Paying');
+test('declined or invalid card: clear message, no access, can try again', async () => {
+    const declined = await open({ seed: { user: USER, cardToken: 'cnon:declined', store: trial(9) } });
+    await declined.page.waitForSelector('#planBanner.expired');
+    await declined.page.click('#planBannerBtn');
+    await declined.page.click('.plan-option[data-plan=monthly]');
+    await declined.page.waitForSelector('#cardContainer .fake-card-form');
+    await declined.page.click('#paySubmitBtn');
+    await declined.page.waitForSelector('#payError:not(.hidden)');
+    assert.equal(await declined.page.textContent('#payError'), 'Card declined.');
+    assert.ok(await declined.page.isVisible('#paywallModal'));
+    assert.ok(await declined.page.isEnabled('#paySubmitBtn'));
+    assert.equal(await declined.page.textContent('#paySubmitBtn'), 'Subscribe for $3.99');
+    assert.ok(await declined.page.isVisible('#planBanner.expired'));
+    assert.ok((await declined.flush()).some(e => e.event_type === 'checkout_failed' && e.event_properties.stage === 'payment'));
+    await declined.context.close();
+
+    const invalid = await open({ seed: { user: USER, cardInvalid: true, store: trial(9) } });
+    await invalid.page.waitForSelector('#planBanner.expired');
+    await invalid.page.click('#planBannerBtn');
+    await invalid.page.click('.plan-option[data-plan=monthly]');
+    await invalid.page.waitForSelector('#cardContainer .fake-card-form');
+    await invalid.page.click('#paySubmitBtn');
+    await invalid.page.waitForSelector('#payError:not(.hidden)');
+    assert.equal(await invalid.page.textContent('#payError'), 'Card number is not valid.');
+    assert.equal(await invalid.page.evaluate(() => (window.__fake.calls || []).length), 0, 'server not called');
+    await invalid.context.close();
+});
+
+const SUBSCRIBED = { 'billing/u1': { active: true, status: 'active', plan: 'yearly', cancelRequested: false, endsAt: null, chargedThrough: '2027-03-05', squareSubscriptionId: 'SUB_1' } };
+
+test('subscriber: no banner, manage screen shows renewal, cancel keeps access to period end', async () => {
+    const { page, context, errors, store } = await open({ seed: { user: USER, store: { ...trial(60), ...SUBSCRIBED } } });
+    await page.waitForSelector('#authLoggedIn:not(.hidden)');
+    await page.waitForTimeout(300);
+    assert.ok(await page.isHidden('#planBanner'));
+    await addBox(page, 'Paid Box');
+
     await page.click('#menuBtn');
-    assert.ok(await page.isVisible('#manageSubscriptionBtn'));
     assert.ok(await page.isHidden('#subscribeMenuBtn'));
     await page.click('#manageSubscriptionBtn');
-    await page.waitForURL('https://billing.stripe.test/portal');
+    await page.waitForSelector('#subscriptionModal:not(.hidden)');
+    const details = () => page.textContent('#subscriptionDetails');
+    assert.match(await details(), /Yearly plan: \$29\.99 per year/);
+    assert.match(await details(), /Renews on March 5, 2027\./);
+
+    page.once('dialog', d => d.accept());
+    await page.click('#cancelSubscriptionBtn');
+    await page.waitForSelector('#cancelSubscriptionBtn', { state: 'hidden' });
+    assert.match(await details(), /Cancelled\. You keep full access until November 21, 2027\./);
+    assert.equal((await store('billing/u1')).cancelRequested, true);
+    assert.equal(await page.evaluate(() => window.__fake.calls.at(-1).name), 'cancelSubscription');
+
+    // Still fully usable until the period ends.
+    await page.click('#subscriptionModal .close-btn');
+    assert.ok(await page.isHidden('#planBanner'));
+    await addBox(page, 'Still Works');
     assert.deepEqual(errors, []);
+    await context.close();
+});
+
+test('cancelled subscription past its end date is read-only again', async () => {
+    const ended = { 'billing/u1': { ...SUBSCRIBED['billing/u1'], cancelRequested: true, endsAt: { __ts: -DAY } } };
+    const { page, context } = await open({ seed: { user: USER, store: { ...trial(60), ...ended } } });
+    await page.waitForSelector('#planBanner.expired');
+    assert.match(await page.textContent('#planBannerText'), /subscription has ended/);
+    await page.click('#addNewBoxBtn');
+    await page.waitForSelector('#paywallModal:not(.hidden)');
+    await context.close();
+});
+
+test('failed renewal: banner explains, access continues while Square retries', async () => {
+    const pastDue = { 'billing/u1': { ...SUBSCRIBED['billing/u1'], status: 'past_due' } };
+    const { page, context } = await open({ seed: { user: USER, store: { ...trial(60), ...pastDue } } });
+    await page.waitForSelector('#planBanner.expired');
+    assert.equal(await page.textContent('#planBannerText'), 'Your last payment did not go through.');
+    await page.click('#planBannerBtn');
+    await page.waitForSelector('#subscriptionModal:not(.hidden)');
+    assert.match(await page.textContent('#subscriptionDetails'), /Square will try the card again/);
+    await page.click('#subscriptionModal .close-btn');
+    await addBox(page, 'Past Due Box');
     await context.close();
 });
 
@@ -214,7 +301,9 @@ test('billing not set up yet: paywall says so and nothing is charged', async () 
     await page.click('.plan-option[data-plan=monthly]');
     await page.waitForSelector('.toast.error');
     assert.match(await page.textContent('.toast'), /not open yet/);
-    assert.equal(await page.evaluate(() => [...window.__fake.store.keys()].filter(p => p.includes('checkout')).length), 0);
+    assert.ok(await page.isVisible('#paywallPlans'));
+    assert.ok(await page.isHidden('#paywallPay'));
+    assert.equal(await page.evaluate(() => (window.__fake.calls || []).length), 0);
     await page.waitForTimeout(1300);
     assert.equal(sent.length, 0, 'no analytics without an API key');
     assert.ok(await page.isHidden('#analyticsToggleBtn'));

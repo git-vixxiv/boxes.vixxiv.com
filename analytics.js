@@ -101,12 +101,16 @@ class Analytics {
         if (this.userId) event.user_id = this.userId;
         this.queue.push(event);
 
-        clearTimeout(this.flushTimer);
-        this.flushTimer = setTimeout(() => this.flush(), FLUSH_DELAY_MS);
+        // Batch what arrives within a second. The timer is not restarted by
+        // later events, so steady activity cannot hold a batch back.
+        if (!this.flushTimer) {
+            this.flushTimer = setTimeout(() => this.flush(), FLUSH_DELAY_MS);
+        }
     }
 
     flush() {
         clearTimeout(this.flushTimer);
+        this.flushTimer = null;
         if (!this.queue.length || !this.isEnabled()) return;
         const events = this.queue;
         this.queue = [];

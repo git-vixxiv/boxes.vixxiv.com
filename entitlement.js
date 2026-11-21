@@ -2,19 +2,18 @@
  * Boxes - entitlement (trial, subscription, business allow-list).
  *
  * Reads three things for the signed-in user and reduces them to one answer:
- *   users/{uid}.trialStartedAt            set once, by the server clock
- *   customers/{uid}/subscriptions         written by the Stripe extension
- *   comp/{email}                          business users who skip the paywall
+ *   users/{uid}.trialStartedAt   set once, by the server clock
+ *   billing/{uid}                subscription state, written by Cloud Functions
+ *   comp/{email}                 business users who skip the paywall
+ *
+ * Payments go through Square: the card form is Square's, the card number
+ * never reaches this app, and the charge is made by a Cloud Function.
  */
 
 import {
     doc,
     getDoc,
     setDoc,
-    addDoc,
-    collection,
-    query,
-    where,
     onSnapshot,
     serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
@@ -24,15 +23,39 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-functions.js';
 
 import { BILLING, isBillingConfigured } from './billing-config.js';
-import { computeEntitlement, ACTIVE_SUBSCRIPTION_STATUSES } from './entitlement-core.js';
+import { computeEntitlement } from './entitlement-core.js';
 
 const LOADING = { state: 'loading', canWrite: true, trialDaysLeft: null, trialEndsAt: null };
-const CHECKOUT_TIMEOUT_MS = 30000;
+
+const SQUARE_SDK = {
+    sandbox: 'https://sandbox.web.squarecdn.com/v1/square.js',
+    production: 'https://web.squarecdn.com/v1/square.js'
+};
+
+let squareSdkLoading = null;
+function loadSquareSdk() {
+    if (window.Square) return Promise.resolve(window.Square);
+    if (!squareSdkLoading) {
+        squareSdkLoading = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = SQUARE_SDK[BILLING.square.environment];
+            script.onload = () => resolve(window.Square);
+            script.onerror = () => {
+                squareSdkLoading = null;
+                reject(new Error('Could not load the payment form. Check your connection and try again.'));
+            };
+            document.head.appendChild(script);
+        });
+    }
+    return squareSdkLoading;
+}
 
 class Entitlement {
     constructor() {
         this.current = LOADING;
+        this.billing = null;
         this.trialJustStarted = false;
+        this.card = null;
         this._reset();
     }
 
@@ -42,8 +65,8 @@ class Entitlement {
         this.user = null;
         this.onChange = null;
         this.trialStartedAt = null;
-        this.subscriptionStatus = null;
         this.comped = false;
+        this.billing = null;
         if (this._unsubscribe) this._unsubscribe();
         this._unsubscribe = null;
         clearInterval(this._timer);
@@ -64,8 +87,9 @@ class Entitlement {
         const session = user.uid;
         const stillCurrent = () => this.user && this.user.uid === session;
 
-        this._watchSubscription();
-        // The trial runs on a clock, so re-check while the app stays open.
+        this._watchBilling();
+        // The trial and a cancelled subscription both run on a clock, so
+        // re-check while the app stays open.
         this._timer = setInterval(() => this._recompute(), 60000);
 
         const [trialStartedAt, comped] = await Promise.all([
@@ -83,6 +107,7 @@ class Entitlement {
     }
 
     stop() {
+        this.destroyCardForm();
         this._reset();
         this.trialJustStarted = false;
         this.current = LOADING;
@@ -109,105 +134,117 @@ class Entitlement {
         return snap.exists();
     }
 
-    _watchSubscription() {
-        const subs = query(
-            collection(this.db, 'customers', this.user.uid, 'subscriptions'),
-            where('status', 'in', ACTIVE_SUBSCRIPTION_STATUSES)
-        );
-        this._unsubscribe = onSnapshot(subs, async (snap) => {
-            const status = snap.empty ? null : snap.docs[0].data().status;
-            if (status === this.subscriptionStatus) return;
-            this.subscriptionStatus = status;
-            // The server checks a claim on the sign-in token; refresh it so a
-            // new subscriber can save straight away.
-            try {
-                await this.user.getIdToken(true);
-            } catch (err) {
-                console.warn('Token refresh failed:', err);
-            }
-            this._recompute();
+    _watchBilling() {
+        this._unsubscribe = onSnapshot(doc(this.db, 'billing', this.user.uid), (snap) => {
+            this.billing = snap.exists() ? snap.data() : null;
+            this._recompute(true);
         }, (err) => {
-            // Billing not installed yet, or offline: treat as no subscription.
+            // Offline, or rules not deployed yet: treat as no subscription.
             console.warn('Subscription status unavailable:', err.code || err.message);
         });
     }
 
-    _recompute() {
+    /** When access ends after a cancellation, in ms, or null. */
+    endsAt() {
+        return this.billing?.endsAt?.toMillis?.() ?? null;
+    }
+
+    _subscriptionLive() {
+        if (!this.billing?.active) return false;
+        const endsAt = this.endsAt();
+        return endsAt === null || Date.now() < endsAt;
+    }
+
+    _recompute(billingChanged = false) {
         if (!this.user) return;
         const previous = this.current;
         this.current = computeEntitlement({
             now: Date.now(),
             trialStartedAt: this.trialStartedAt,
-            subscriptionStatus: this.subscriptionStatus,
+            subscriptionStatus: this._subscriptionLive() ? 'active' : null,
             comped: this.comped,
             trialDays: BILLING.trialDays
         });
         const changed = previous.state !== this.current.state
             || previous.trialDaysLeft !== this.current.trialDaysLeft;
-        if (changed && this.onChange) this.onChange(this.current, previous);
+        if ((changed || billingChanged) && this.onChange) this.onChange(this.current, previous);
+    }
+
+    _callable(name) {
+        return httpsCallable(getFunctions(this.app, BILLING.functionsRegion), name);
     }
 
     /**
-     * Send the user to Stripe Checkout for a plan ("monthly" or "yearly").
-     * Resolves once the browser has been pointed at Stripe.
+     * Put Square's card form into the page element matching `selector`.
      */
-    async startCheckout(planKey) {
-        if (!this.user) throw new Error('Please sign in first.');
+    async mountCardForm(selector) {
         if (!isBillingConfigured()) {
             throw new Error('Subscriptions are not open yet. Please check back soon.');
         }
-        const plan = BILLING.plans[planKey];
-        if (!plan) throw new Error('Unknown plan.');
+        this.destroyCardForm();
+        const Square = await loadSquareSdk();
+        this.payments = Square.payments(BILLING.square.applicationId, BILLING.square.locationId);
+        const card = await this.payments.card();
+        await card.attach(selector);
+        this.card = card;
+    }
 
-        const base = window.location.origin + window.location.pathname;
-        const sessionRef = await addDoc(
-            collection(this.db, 'customers', this.user.uid, 'checkout_sessions'),
-            {
-                price: plan.stripePriceId,
-                success_url: `${base}?checkout=success`,
-                cancel_url: `${base}?checkout=cancelled`,
-                allow_promotion_codes: true
-            }
-        );
-
-        return new Promise((resolve, reject) => {
-            let unsubscribe = () => {};
-            const timer = setTimeout(() => {
-                unsubscribe();
-                reject(new Error('Checkout is taking too long. Please try again.'));
-            }, CHECKOUT_TIMEOUT_MS);
-
-            unsubscribe = onSnapshot(sessionRef, (snap) => {
-                const { error, url } = snap.data() || {};
-                if (error) {
-                    clearTimeout(timer);
-                    unsubscribe();
-                    reject(new Error(error.message || 'Checkout could not be started.'));
-                } else if (url) {
-                    clearTimeout(timer);
-                    unsubscribe();
-                    window.location.assign(url);
-                    resolve();
-                }
-            }, (err) => {
-                clearTimeout(timer);
-                reject(err);
-            });
-        });
+    destroyCardForm() {
+        if (this.card) {
+            try { this.card.destroy(); } catch (e) { /* already gone */ }
+        }
+        this.card = null;
     }
 
     /**
-     * Open Stripe's customer portal (update card, cancel, invoices).
+     * Charge the card in the mounted form and start the subscription.
+     * Resolves once the server has confirmed it.
      */
-    async openPortal() {
+    async subscribe(planKey) {
         if (!this.user) throw new Error('Please sign in first.');
-        const functions = getFunctions(this.app, BILLING.functionsRegion);
-        const createPortalLink = httpsCallable(
-            functions,
-            'ext-firestore-stripe-payments-createPortalLink'
-        );
-        const { data } = await createPortalLink({ returnUrl: window.location.href });
-        window.location.assign(data.url);
+        if (!this.card) throw new Error('The payment form is not ready yet.');
+        if (!BILLING.plans[planKey]) throw new Error('Unknown plan.');
+
+        const result = await this.card.tokenize();
+        if (result.status !== 'OK') {
+            const detail = result.errors?.map(e => e.message).join(' ');
+            throw new Error(detail || 'Please check your card details.');
+        }
+
+        // Strong customer authentication (3-D Secure), where the card's bank
+        // asks for it. Not every card needs it, so a failure here is not
+        // fatal: Square rejects the charge itself if verification was required.
+        let verificationToken;
+        try {
+            const verification = await this.payments.verifyBuyer(result.token, {
+                intent: 'STORE',
+                billingContact: { email: this.user.email || undefined }
+            });
+            verificationToken = verification?.token;
+        } catch (err) {
+            console.warn('Buyer verification skipped:', err?.message || err);
+        }
+
+        try {
+            await this._callable('createSubscription')({
+                plan: planKey,
+                token: result.token,
+                verificationToken
+            });
+        } catch (err) {
+            throw new Error(err?.message || 'The payment could not be completed.');
+        }
+    }
+
+    /** Stop renewal. Access continues until the returned date (ms). */
+    async cancel() {
+        if (!this.user) throw new Error('Please sign in first.');
+        try {
+            const { data } = await this._callable('cancelSubscription')({});
+            return data.endsAt;
+        } catch (err) {
+            throw new Error(err?.message || 'Could not cancel the subscription.');
+        }
     }
 }
 
