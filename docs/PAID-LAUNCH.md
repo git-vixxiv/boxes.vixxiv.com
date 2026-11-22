@@ -66,10 +66,9 @@ same environment; that creates a duplicate plan.
 
 ### 4. Deploy the functions
 
-    cd functions && npm install && cd ..
-    firebase functions:secrets:set SQUARE_ACCESS_TOKEN
-    firebase functions:secrets:set SQUARE_WEBHOOK_SIGNATURE_KEY
-    firebase deploy --only functions
+Deploys are automatic from GitHub once `docs/DEPLOY-SETUP.md` has been
+followed (a browser-only, one-time setup: the two Square secrets in Google
+Secret Manager and a deploy key in the repository's secrets).
 
 The remaining settings are not secret and live in `functions/.env`, which is
 committed with the **sandbox** values already filled in:
@@ -116,9 +115,9 @@ production values.
 
 ## Going live, in this order
 
-1. Deploy the functions (step 4 above).
-2. Merge `paid-launch` and let the app deploy.
-3. Then deploy the rules: `firebase deploy --only firestore:rules`.
+1. Functions: already deployed by pushes to `paid-launch`.
+2. Merge `paid-launch`. The app deploys, and the database rules deploy
+   automatically straight after it.
 
 The order matters. The new rules only allow saving for accounts with a trial,
 a subscription or an allow-list entry, and only the new app starts the trial.

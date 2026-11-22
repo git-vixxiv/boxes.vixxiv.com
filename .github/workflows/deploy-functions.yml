@@ -1,0 +1,76 @@
+name: Deploy Firebase functions
+
+# Deploys the Cloud Functions in functions/ (Square billing, webhook, account
+# deletion). Safe to run at any time: the live app does not call these until
+# the paid version is released.
+#
+# One-time setup is in docs/DEPLOY-SETUP.md. Until the FIREBASE_SERVICE_ACCOUNT
+# secret exists, this workflow skips the deploy instead of failing.
+
+on:
+  push:
+    branches: ["paid-launch", "claude/item-location-tracker-Tphxw", "main"]
+    paths:
+      - "functions/**"
+      - "firebase.json"
+      - ".github/workflows/deploy-functions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firebase-functions
+  cancel-in-progress: false
+
+env:
+  FIREBASE_PROJECT: boxes-ffa31
+  FIREBASE_TOOLS_VERSION: 13.29.1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check for the deploy key
+        id: key
+        env:
+          KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::FIREBASE_SERVICE_ACCOUNT is not set, so nothing was deployed. See docs/DEPLOY-SETUP.md."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Unit tests
+        run: node --test tests/entitlement.test.mjs tests/functions.test.mjs
+
+      - name: Install function dependencies
+        if: steps.key.outputs.present == 'true'
+        run: npm ci --prefix functions
+
+      - name: Deploy functions
+        if: steps.key.outputs.present == 'true'
+        env:
+          KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$KEY" > "$RUNNER_TEMP/firebase-key.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-key.json"
+          # --force lets the deploy set the build-image cleanup policy without
+          # a prompt. It also removes functions that are no longer in
+          # functions/index.js, which is what we want for this project.
+          npx --yes "firebase-tools@$FIREBASE_TOOLS_VERSION" deploy \
+            --only functions --project "$FIREBASE_PROJECT" --non-interactive --force
+
+      - name: Remove the deploy key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/firebase-key.json"
