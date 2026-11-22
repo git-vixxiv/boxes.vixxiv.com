@@ -159,6 +159,20 @@ const serverFunctions = {
         }, true);
         return { plan, subscriptionId: 'SUB_1' };
     },
+    async deleteAccount() {
+        if (fake.deleteFails) {
+            const err = new Error('Your subscription could not be cancelled just now, so nothing was deleted. Please try again in a few minutes.');
+            err.code = 'functions/unavailable';
+            throw err;
+        }
+        const uid = fake.user.uid;
+        for (const path of [...fake.store.keys()]) {
+            if (path === `users/${uid}` || path.startsWith(`users/${uid}/`) || path === `billing/${uid}`) {
+                fake.store.delete(path);
+            }
+        }
+        return { deleted: true };
+    },
     async cancelSubscription() {
         const endsAt = Date.UTC(2027, 10, 21, 23, 59, 59);
         write(`billing/${fake.user.uid}`, { cancelRequested: true, endsAt: ts(endsAt) }, true);

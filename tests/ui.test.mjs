@@ -236,6 +236,40 @@ test('subscriber: no banner, manage screen shows renewal, cancel keeps access to
     await context.close();
 });
 
+test('delete account: needs DELETE typed, erases everything and signs out', async () => {
+    const { page, context, errors, flush } = await open({
+        seed: { user: USER, store: { ...trial(60), ...SUBSCRIBED, ...BIN, ...HAMMER, 'users/other/items/x': { id: 'x', name: 'Not mine' } } }
+    });
+    await page.waitForSelector('#authLoggedIn:not(.hidden)');
+    await page.waitForTimeout(300);
+    await page.click('#menuBtn');
+    await page.click('#deleteAccountMenuBtn');
+    await page.waitForSelector('#deleteAccountModal:not(.hidden)');
+    assert.ok(await page.isVisible('#deleteAccountSubscriptionNote'));
+    assert.ok(await page.isDisabled('#deleteAccountBtn'));
+    await page.fill('#deleteAccountConfirm', 'delete');
+    assert.ok(await page.isDisabled('#deleteAccountBtn'), 'lower case is not enough');
+
+    // A failure on the server deletes nothing and keeps the user signed in.
+    await page.evaluate(() => { window.__fake.deleteFails = true; });
+    await page.fill('#deleteAccountConfirm', 'DELETE');
+    await page.click('#deleteAccountBtn');
+    await page.waitForSelector('.toast.error');
+    assert.match(await page.textContent('.toast'), /nothing was deleted/);
+    assert.ok(await page.isVisible('#authLoggedIn'));
+    assert.equal(await page.evaluate(() => window.__fake.store.has('users/u1/items/i1')), true);
+
+    await page.evaluate(() => { window.__fake.deleteFails = false; });
+    await page.click('#deleteAccountBtn');
+    await page.waitForSelector('#notSignedInView:not(.hidden)');
+    const left = await page.evaluate(() => [...window.__fake.store.keys()]);
+    assert.deepEqual(left, ['users/other/items/x']);
+    assert.ok(await page.isHidden('#planBanner'));
+    assert.ok((await flush()).some(e => e.event_type === 'account_deleted'));
+    assert.deepEqual(errors, []);
+    await context.close();
+});
+
 test('cancelled subscription past its end date is read-only again', async () => {
     const ended = { 'billing/u1': { ...SUBSCRIBED['billing/u1'], cancelRequested: true, endsAt: { __ts: -DAY } } };
     const { page, context } = await open({ seed: { user: USER, store: { ...trial(60), ...ended } } });

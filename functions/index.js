@@ -3,6 +3,7 @@
  *
  *   createSubscription   start a paid subscription from a tokenized card
  *   cancelSubscription   stop renewal; access runs to the end of the period
+ *   deleteAccount        stop the subscription, then erase the account and its data
  *   squareWebhook        Square tells us about renewals, failures and endings
  *   reportSubscriptionEvent   mirror those changes to Amplitude
  *
@@ -15,10 +16,12 @@ import { defineString, defineSecret } from 'firebase-functions/params';
 import { logger } from 'firebase-functions';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 
 import { createSquare } from './square.js';
 import { createBilling, BillingError, isValidSignature } from './billing.js';
 import { subscriptionEvent } from './events.js';
+import { createAccountDeletion } from './account.js';
 
 initializeApp();
 
@@ -40,13 +43,17 @@ const AMPLITUDE_ENDPOINT = defineString('AMPLITUDE_ENDPOINT', {
     default: 'https://api2.amplitude.com/2/httpapi'
 });
 
+function square() {
+    return createSquare({
+        environment: SQUARE_ENVIRONMENT.value(),
+        accessToken: SQUARE_ACCESS_TOKEN.value()
+    });
+}
+
 function billing() {
     return createBilling({
         db: getFirestore(),
-        square: createSquare({
-            environment: SQUARE_ENVIRONMENT.value(),
-            accessToken: SQUARE_ACCESS_TOKEN.value()
-        }),
+        square: square(),
         config: {
             locationId: SQUARE_LOCATION_ID.value(),
             planVariationIds: {
@@ -92,6 +99,19 @@ export const cancelSubscription = onCall(
         if (!request.auth) throw new HttpsError('unauthenticated', 'Please sign in first.');
         const uid = request.auth.uid;
         return run('cancelSubscription', uid, () => billing().cancel({ uid }));
+    }
+);
+
+export const deleteAccount = onCall(
+    { region: REGION, secrets: [SQUARE_ACCESS_TOKEN] },
+    async (request) => {
+        if (!request.auth) throw new HttpsError('unauthenticated', 'Please sign in first.');
+        const uid = request.auth.uid;
+        return run('deleteAccount', uid, () => createAccountDeletion({
+            db: getFirestore(),
+            auth: getAuth(),
+            square: square()
+        }).deleteAccount({ uid }));
     }
 );
 

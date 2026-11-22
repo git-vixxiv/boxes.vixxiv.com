@@ -33,6 +33,11 @@ write.
   the card. If the retries run out, Square ends the subscription.
 - There is no "update my card" screen yet. Someone whose card has expired
   subscribes again with the new card once the old subscription has ended.
+- **Delete Account** (in the menu) stops the subscription at Square, then
+  erases the user's items, boxes, photos, preferences, billing record and
+  sign-in. If Square cannot be reached, nothing is deleted. Square keeps its
+  own customer and payment records. Someone who deletes and signs up again
+  gets a new trial.
 - There is no trial in Square. The 7-day trial is tracked by the app, before
   any card exists.
 
@@ -156,7 +161,6 @@ Events: `session_started`, `trial_started`, `trial_expired`, `box_created`,
 
 - Photos still live inside the database records; moving them to Cloud Storage.
 - Privacy policy and terms pages.
-- In-app "delete my account and data".
 - An "update my card" screen, and undoing a cancellation before it takes effect.
 - The deployed functions, the webhook delivery, the deployed rules, Square's
   real card form in a browser, and Amplitude have not been exercised. Step 8

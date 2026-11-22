@@ -1489,3 +1489,13 @@ body {
 .card-container:empty::before {
     content: 'Loading payment form...';
 }
+
+/* Delete account */
+#deleteAccountModal .paywall-body > p {
+    margin-bottom: 0.75rem;
+    color: var(--gray-700);
+}
+
+#deleteAccountModal .form-group {
+    padding: 0;
+}

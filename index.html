@@ -58,6 +58,7 @@
             <a href="#" id="subscribeMenuBtn" class="menu-item hidden">Subscribe</a>
             <a href="#" id="manageSubscriptionBtn" class="menu-item hidden">Manage Subscription</a>
             <a href="#" id="analyticsToggleBtn" class="menu-item hidden">Usage analytics: Off</a>
+            <a href="#" id="deleteAccountMenuBtn" class="menu-item hidden">Delete Account</a>
             <input type="file" id="importFile" accept=".json" class="hidden">
             <input type="file" id="bulkImportFile" accept=".csv,.tsv,.txt" class="hidden">
         </nav>
@@ -525,6 +526,29 @@
                     <div class="form-actions">
                         <button id="cancelSubscriptionBtn" type="button" class="secondary-btn danger">Cancel Subscription</button>
                         <button type="button" class="secondary-btn" data-close="subscriptionModal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete account -->
+        <div id="deleteAccountModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Delete Account</h3>
+                    <button class="close-btn" data-close="deleteAccountModal" aria-label="Close">&times;</button>
+                </div>
+                <div class="paywall-body">
+                    <p>This permanently deletes your account and everything in it: every item, box and photo. It cannot be undone.</p>
+                    <p id="deleteAccountSubscriptionNote" class="hidden">Your subscription is cancelled and will not renew. The period you have already paid for is not refunded.</p>
+                    <p>Want a copy first? Close this and use Export Data in the menu.</p>
+                    <div class="form-group">
+                        <label for="deleteAccountConfirm">Type DELETE to confirm</label>
+                        <input type="text" id="deleteAccountConfirm" autocomplete="off" autocapitalize="characters">
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="secondary-btn" data-close="deleteAccountModal">Cancel</button>
+                        <button id="deleteAccountBtn" type="button" class="secondary-btn danger" disabled>Delete Everything</button>
                     </div>
                 </div>
             </div>

@@ -236,6 +236,19 @@ class Entitlement {
         }
     }
 
+    /**
+     * Cancel any subscription, then erase the account and everything stored
+     * for it. Cannot be undone.
+     */
+    async deleteAccount() {
+        if (!this.user) throw new Error('Please sign in first.');
+        try {
+            await this._callable('deleteAccount')({});
+        } catch (err) {
+            throw new Error(err?.message || 'The account could not be deleted.');
+        }
+    }
+
     /** Stop renewal. Access continues until the returned date (ms). */
     async cancel() {
         if (!this.user) throw new Error('Please sign in first.');

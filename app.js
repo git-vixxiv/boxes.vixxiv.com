@@ -675,6 +675,35 @@ async function handleCancelSubscription() {
     }
 }
 
+function openDeleteAccountModal() {
+    const input = document.getElementById('deleteAccountConfirm');
+    input.value = '';
+    document.getElementById('deleteAccountBtn').disabled = true;
+    document.getElementById('deleteAccountSubscriptionNote')
+        .classList.toggle('hidden', entitlement.current.state !== 'subscribed');
+    document.getElementById('deleteAccountModal').classList.remove('hidden');
+}
+
+async function handleDeleteAccount() {
+    const button = document.getElementById('deleteAccountBtn');
+    button.disabled = true;
+    button.textContent = 'Deleting...';
+    try {
+        await entitlement.deleteAccount();
+        analytics.track('account_deleted');
+        analytics.flush();
+        document.getElementById('deleteAccountModal').classList.add('hidden');
+        // The account no longer exists; this clears the local session.
+        await firebaseDB.signOutUser().catch(() => {});
+        showToast('Your account and data have been deleted.', 'success');
+    } catch (error) {
+        showToast(error.message, 'error');
+        button.disabled = false;
+    } finally {
+        button.textContent = 'Delete Everything';
+    }
+}
+
 function renderEntitlement(current, previous) {
     const banner = document.getElementById('planBanner');
     const text = document.getElementById('planBannerText');
@@ -702,6 +731,7 @@ function renderEntitlement(current, previous) {
             : 'Free trial ended. Your inventory is read-only.';
     }
 
+    document.getElementById('deleteAccountMenuBtn').classList.toggle('hidden', !signedIn);
     subscribeMenu.classList.toggle('hidden', !needsPlan);
     manageMenu.classList.toggle('hidden', !subscribed);
 
@@ -754,6 +784,16 @@ function initBilling() {
     });
     document.getElementById('cancelSubscriptionBtn')
         .addEventListener('click', handleCancelSubscription);
+
+    document.getElementById('deleteAccountMenuBtn').addEventListener('click', (e) => {
+        e.preventDefault();
+        elements.menu.classList.add('hidden');
+        openDeleteAccountModal();
+    });
+    document.getElementById('deleteAccountConfirm').addEventListener('input', (e) => {
+        document.getElementById('deleteAccountBtn').disabled = e.target.value.trim() !== 'DELETE';
+    });
+    document.getElementById('deleteAccountBtn').addEventListener('click', handleDeleteAccount);
     document.querySelectorAll('.trial-days').forEach(el => {
         el.textContent = BILLING.trialDays;
     });

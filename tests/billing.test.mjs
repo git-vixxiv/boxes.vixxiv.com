@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { createBilling, BillingError } from '../functions/billing.js';
+import { createAccountDeletion } from '../functions/account.js';
 
 let db;
 before(() => {
@@ -16,6 +17,7 @@ before(() => {
 beforeEach(async () => {
     const docs = await db.collection('billing').listDocuments();
     await Promise.all(docs.map(d => d.delete()));
+    await db.recursiveDelete(db.collection('users'));
 });
 
 function fakeSquare(over = {}) {
@@ -229,4 +231,70 @@ test('webhook: unknown subscriptions and event types are ignored', async () => {
     ]) {
         assert.equal((await billing.handleEvent(event)).handled, false);
     }
+});
+
+// ---------- account deletion ----------
+
+async function seedInventory(uid) {
+    await db.doc(`users/${uid}`).set({ trialStartedAt: new Date() });
+    await db.doc(`users/${uid}/items/i1`).set({ name: 'Hammer', photo: 'data:...' });
+    await db.doc(`users/${uid}/containers/c1`).set({ name: 'Bin' });
+    await db.doc(`users/${uid}/prefs/analytics`).set({ enabled: true });
+}
+const exists = async (path) => (await db.doc(path).get()).exists;
+const fakeAuth = () => {
+    const deleted = [];
+    return { deleted, async deleteUser(uid) { deleted.push(uid); } };
+};
+
+test('delete account: cancels the subscription, then erases everything of that user only', async () => {
+    const { billing, square } = setup();
+    await billing.subscribe(card);
+    await seedInventory('u1');
+    await seedInventory('u2');
+    await db.doc('billing/u2').set({ active: false });
+    const auth = fakeAuth();
+
+    const result = await createAccountDeletion({ db, auth, square, now: () => NOW }).deleteAccount({ uid: 'u1' });
+    assert.deepEqual(result, { deleted: true, subscriptionCancelled: true });
+    assert.equal(square.calls.filter(c => c[0] === 'cancelSubscription').length, 1);
+    for (const path of ['users/u1', 'users/u1/items/i1', 'users/u1/containers/c1', 'users/u1/prefs/analytics', 'billing/u1']) {
+        assert.equal(await exists(path), false, `${path} should be gone`);
+    }
+    for (const path of ['users/u2', 'users/u2/items/i1', 'users/u2/containers/c1', 'billing/u2']) {
+        assert.equal(await exists(path), true, `${path} must be untouched`);
+    }
+    assert.deepEqual(auth.deleted, ['u1']);
+});
+
+test('delete account: if Square cannot cancel, nothing is deleted', async () => {
+    const { billing } = setup();
+    await billing.subscribe(card);
+    await seedInventory('u1');
+    const auth = fakeAuth();
+    const broken = fakeSquare({ async cancelSubscription() { throw new Error('Square is down'); } });
+
+    await rejects(
+        createAccountDeletion({ db, auth, square: broken, now: () => NOW }).deleteAccount({ uid: 'u1' }),
+        'unavailable', /nothing was deleted/
+    );
+    assert.equal(await exists('users/u1/items/i1'), true);
+    assert.equal(await exists('billing/u1'), true);
+    assert.deepEqual(auth.deleted, []);
+});
+
+test('delete account: no subscription, or one already cancelled, never calls Square', async () => {
+    const { billing, square } = setup();
+    await seedInventory('u1');
+    const auth = fakeAuth();
+    const first = await createAccountDeletion({ db, auth, square, now: () => NOW }).deleteAccount({ uid: 'u1' });
+    assert.deepEqual(first, { deleted: true, subscriptionCancelled: false });
+    assert.equal(square.calls.length, 0);
+
+    await billing.subscribe({ ...card, uid: 'u3' });
+    await billing.cancel({ uid: 'u3' });
+    const before = square.calls.filter(c => c[0] === 'cancelSubscription').length;
+    await createAccountDeletion({ db, auth, square, now: () => NOW }).deleteAccount({ uid: 'u3' });
+    assert.equal(square.calls.filter(c => c[0] === 'cancelSubscription').length, before);
+    assert.equal(await exists('billing/u3'), false);
 });
