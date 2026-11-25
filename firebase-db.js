@@ -134,6 +134,15 @@ class FirebaseDB {
         return `users/${this.user.uid}/${collectionName}`;
     }
 
+    /**
+     * Record whether usage analytics is on for this user, so the server
+     * honours the same choice when it reports subscription events.
+     */
+    async setAnalyticsPref(enabled) {
+        if (!this.user) return;
+        await setDoc(doc(this.db, this.getUserPath('prefs'), 'analytics'), { enabled: !!enabled });
+    }
+
     // ==================== CONTAINER OPERATIONS ====================
 
     async addContainer(container) {
@@ -441,28 +450,38 @@ class FirebaseDB {
             throw new Error('Invalid import data format');
         }
 
-        const batch = writeBatch(this.db);
+        // Exports made by "Export Data" leave photos out. Merging keeps the
+        // photo already stored for a record instead of wiping it.
+        const clean = (record) => {
+            const { hasPhoto, ...rest } = record;
+            if (rest.photo === undefined) delete rest.photo;
+            return rest;
+        };
 
-        // Import containers
-        for (const container of data.containers) {
-            const docRef = doc(this.db, this.getUserPath('containers'), container.id);
-            batch.set(docRef, {
-                ...container,
-                dateModified: new Date().toISOString()
-            });
+        const writes = [
+            ...data.containers.map(container => ({
+                ref: doc(this.db, this.getUserPath('containers'), container.id),
+                data: { ...clean(container), dateModified: new Date().toISOString() }
+            })),
+            ...data.items.map(item => ({
+                ref: doc(this.db, this.getUserPath('items'), item.id),
+                data: {
+                    ...clean(item),
+                    status: item.status || 'stored',
+                    dateModified: new Date().toISOString()
+                }
+            }))
+        ];
+
+        // Firestore caps a batch at 500 writes and 10 MB; photos are large.
+        const BATCH_SIZE = 20;
+        for (let i = 0; i < writes.length; i += BATCH_SIZE) {
+            const batch = writeBatch(this.db);
+            for (const write of writes.slice(i, i + BATCH_SIZE)) {
+                batch.set(write.ref, write.data, { merge: true });
+            }
+            await batch.commit();
         }
-
-        // Import items
-        for (const item of data.items) {
-            const docRef = doc(this.db, this.getUserPath('items'), item.id);
-            batch.set(docRef, {
-                ...item,
-                status: item.status || 'stored',
-                dateModified: new Date().toISOString()
-            });
-        }
-
-        await batch.commit();
 
         return {
             containersImported: data.containers.length,

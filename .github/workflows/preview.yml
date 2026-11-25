@@ -1,0 +1,49 @@
+name: Publish test build
+
+# Publishes the paid-launch branch to a private-by-obscurity Firebase Hosting
+# preview address, so the paid version can be tried without touching the live
+# site. The address is printed in the run summary and stays the same between
+# pushes. Skips, without failing, until FIREBASE_SERVICE_ACCOUNT exists
+# (docs/DEPLOY-SETUP.md).
+
+on:
+  push:
+    branches: ["paid-launch"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firebase-preview
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Publish to the preview address
+        env:
+          KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::FIREBASE_SERVICE_ACCOUNT is not set, so no test build was published. See docs/DEPLOY-SETUP.md."
+            exit 0
+          fi
+          printf '%s' "$KEY" > "$RUNNER_TEMP/firebase-key.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-key.json"
+          npx --yes firebase-tools@13.29.1 hosting:channel:deploy paid-launch \
+            --project boxes-ffa31 --expires 30d --non-interactive --json > "$RUNNER_TEMP/preview.json"
+          rm -f "$RUNNER_TEMP/firebase-key.json"
+          URL=$(node -e "const r=require(process.argv[1]).result; console.log(Object.values(r)[0].url)" "$RUNNER_TEMP/preview.json")
+          echo "Test build: $URL"
+          echo "### Test build" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"

@@ -35,3 +35,37 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # Database rules go out only after the app itself is live, because the paid
+  # version's rules would stop the previous app from saving.
+  rules:
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Deploy Firestore rules
+        env:
+          KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ ! -f firestore.rules ]; then
+            echo "No firestore.rules on this branch; nothing to deploy."
+            exit 0
+          fi
+          if [ -z "$KEY" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT is not set, so the database rules were NOT deployed. See docs/DEPLOY-SETUP.md."
+            exit 1
+          fi
+          printf '%s' "$KEY" > "$RUNNER_TEMP/firebase-key.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/firebase-key.json"
+          npx --yes firebase-tools@13.29.1 deploy \
+            --only firestore:rules --project boxes-ffa31 --non-interactive
+          rm -f "$RUNNER_TEMP/firebase-key.json"
