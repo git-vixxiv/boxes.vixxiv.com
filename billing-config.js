@@ -32,7 +32,7 @@ export const BILLING = {
         // Sandbox ids start with "sandbox-sq0idb-", production with "sq0idp-".
         applicationId: '',
         // Square Developer Dashboard > Locations.
-        locationId: ''
+        locationId: 'LVSKN9DAW9PFA'
     },
 
     // Region the Cloud Functions are deployed in.

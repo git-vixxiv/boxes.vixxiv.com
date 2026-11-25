@@ -7,6 +7,7 @@ After this, nobody runs deploy commands. Pushing code deploys it:
 | Cloud Functions (Square billing, webhook, account deletion) | On every push that changes `functions/`. Safe at any time; the live app does not use them until the paid version is released. |
 | Database rules | Only when the paid version is merged to the live branch, straight after the app itself has deployed. |
 | The app | As before, when the live branch changes. |
+| A test build of the paid version | On every push to `paid-launch`, to a separate preview address that does not affect the live site. The address is shown in the run summary of "Publish test build" under the repository's Actions tab. |
 
 Everything below is done in a browser, signed in as the Google account that
 owns the Boxes Firebase project. Do the steps in order.

@@ -57,7 +57,7 @@ async function open({ seed = {}, timezone = 'America/Chicago', configured = true
         if (configured) {
             body = body
                 .replace("applicationId: ''", "applicationId: 'sandbox-sq0idb-test'")
-                .replace("locationId: ''", "locationId: 'LOC_TEST'")
+                .replace(/locationId: '[^']*'/, "locationId: 'LOC_TEST'")
                 .replace("amplitudeApiKey: ''", "amplitudeApiKey: 'test-key'");
         }
         route.fulfill({ contentType: 'text/javascript', body });
